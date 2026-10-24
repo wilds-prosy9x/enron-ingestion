@@ -6,15 +6,19 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/wilds-prosy9x/enron-ingestion/internal/store"
 )
+
+// startTimeout limits how long recording a new run as started may take.
+const startTimeout = 5 * time.Second
 
 // ErrStopped is returned by Starter.Start after Stop has been called.
 var ErrStopped = errors.New("starter stopped")
 
 // RunStore is the store a Starter needs. *store.Redis implements it.
 type RunStore interface {
-	Recorder
-	TryStart(ctx context.Context, dedupMode string) error
+	TryStart(ctx context.Context, dedupMode string) (store.Run, error)
 }
 
 // StarterConfig configures the runs a Starter starts.
@@ -24,6 +28,8 @@ type StarterConfig struct {
 	// BatchSize and FlushInterval are passed to the Runner; zero means its default.
 	BatchSize     int
 	FlushInterval time.Duration
+	// LeaseRenewInterval is how often a run's lease is renewed. Default store.LeaseTTL / 3.
+	LeaseRenewInterval time.Duration
 }
 
 // Starter starts ingestion runs in the background.
@@ -48,36 +54,81 @@ func NewStarter(st RunStore, cfg StarterConfig) *Starter {
 
 // Start begins a run in the background and returns once it has been recorded
 // as running. It returns store.ErrAlreadyStarted if a run is in progress or has
-// finished, and ErrStopped after Stop. ctx is only used to start the run; the
-// run itself continues until it ends or Stop is called.
+// finished, and ErrStopped after Stop. Cancelling ctx doesn't stop the run, nor
+// interrupt starting it; the run continues until it ends or Stop is called.
 func (s *Starter) Start(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.stopped {
 		return ErrStopped
 	}
-	if err := s.store.TryStart(ctx, string(s.cfg.DedupMode)); err != nil {
+	// If ctx were cancelled while TryStart waits for Redis's reply, the run
+	// could be recorded as running with nothing running it.
+	startCtx, cancelStart := context.WithTimeout(context.WithoutCancel(ctx), startTimeout)
+	defer cancelStart()
+	run, err := s.store.TryStart(startCtx, string(s.cfg.DedupMode))
+	if err != nil {
 		return err
 	}
 
 	r := &Runner{
 		Source:        s.cfg.Source,
-		Recorder:      s.store,
+		Recorder:      run,
 		BatchSize:     s.cfg.BatchSize,
 		FlushInterval: s.cfg.FlushInterval,
 	}
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
+		runCtx, stopRun := context.WithCancel(s.ctx)
+		defer stopRun()
+		leaseDone := make(chan struct{})
+		go func() {
+			defer close(leaseDone)
+			s.keepLease(runCtx, run, stopRun)
+		}()
+
 		start := time.Now()
 		slog.Info("ingestion started", "dedup_mode", s.cfg.DedupMode)
-		if err := r.Run(s.ctx); err != nil {
+		err := r.Run(runCtx)
+		stopRun()
+		<-leaseDone
+		if err != nil {
 			slog.Error("ingestion failed", "error", err, "duration", time.Since(start))
 			return
 		}
 		slog.Info("ingestion finished", "duration", time.Since(start))
 	}()
 	return nil
+}
+
+// keepLease renews run's lease until ctx is done. If the run has been replaced
+// by another one, it calls stopRun, as there is no point in continuing.
+// Other errors are retried; the lease only expires if they last for store.LeaseTTL.
+func (s *Starter) keepLease(ctx context.Context, run store.Run, stopRun func()) {
+	interval := s.cfg.LeaseRenewInterval
+	if interval <= 0 {
+		interval = store.LeaseTTL / 3
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		err := run.RenewLease(ctx)
+		switch {
+		case err == nil, ctx.Err() != nil:
+		case errors.Is(err, store.ErrNotRunning):
+			slog.Error("ingestion run is no longer the current run, stopping it")
+			stopRun()
+			return
+		default:
+			slog.Warn("renew ingestion lease", "error", err)
+		}
+	}
 }
 
 // Stop cancels any running run, which is then marked failed, and waits for it

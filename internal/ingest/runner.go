@@ -17,7 +17,7 @@ const (
 	endTimeout = 5 * time.Second
 )
 
-// Recorder receives the results of a run. *store.Redis implements it.
+// Recorder receives the results of a run. store.Run implements it.
 type Recorder interface {
 	RecordBatch(ctx context.Context, records []store.Record) error
 	Finish(ctx context.Context) error
@@ -42,7 +42,7 @@ type Runner struct {
 // cancelled may be lost, depending on the Recorder.
 // After cancellation, Run waits for the Source to stop; a Source that ignores
 // ctx while blocked in a read delays it until that read returns.
-// The caller must have started the run (store.Store.TryStart) beforehand.
+// The Recorder is usually the store.Run returned by store.Store.TryStart.
 func (r *Runner) Run(ctx context.Context) error {
 	err := r.ingest(ctx)
 

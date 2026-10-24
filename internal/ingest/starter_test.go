@@ -13,23 +13,41 @@ import (
 	"github.com/wilds-prosy9x/enron-ingestion/internal/store"
 )
 
-// fakeRunStore adds TryStart to fakeRecorder. It allows one run at a time.
+// fakeRunStore adds TryStart and RenewLease to fakeRecorder, and is its own
+// store.Run. It allows one run at a time.
 type fakeRunStore struct {
 	*fakeRecorder
-	mu      sync.Mutex
-	running bool
-	modes   []string
+	mu       sync.Mutex
+	running  bool
+	modes    []string
+	startErr error // ctx.Err() seen by TryStart
+	renewErr error // optional: returned by RenewLease
+	renewals int
 }
 
-func (f *fakeRunStore) TryStart(ctx context.Context, dedupMode string) error {
+func (f *fakeRunStore) TryStart(ctx context.Context, dedupMode string) (store.Run, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.running {
-		return store.ErrAlreadyStarted
+		return nil, store.ErrAlreadyStarted
 	}
 	f.running = true
 	f.modes = append(f.modes, dedupMode)
-	return nil
+	f.startErr = ctx.Err()
+	return f, nil
+}
+
+func (f *fakeRunStore) RenewLease(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.renewals++
+	return f.renewErr
+}
+
+func (f *fakeRunStore) renewCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.renewals
 }
 
 func TestStarterRunsInBackground(t *testing.T) {
@@ -105,4 +123,88 @@ func TestStarterStopCancelsRun(t *testing.T) {
 func TestStarterStopWithoutRun(t *testing.T) {
 	s := ingest.NewStarter(&fakeRunStore{fakeRecorder: &fakeRecorder{}}, ingest.StarterConfig{})
 	s.Stop()
+}
+
+// TestStarterStartIgnoresRequestCancel checks that a cancelled request can't
+// interrupt TryStart, which could leave a run recorded as running with nothing
+// running it.
+func TestStarterStartIgnoresRequestCancel(t *testing.T) {
+	st := &fakeRunStore{fakeRecorder: &fakeRecorder{}}
+	s := ingest.NewStarter(st, ingest.StarterConfig{Source: &chanSource{ch: make(chan ingest.Message)}})
+	t.Cleanup(s.Stop)
+
+	reqCtx, cancelReq := context.WithCancel(t.Context())
+	cancelReq()
+	if err := s.Start(reqCtx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if st.startErr != nil {
+		t.Errorf("TryStart got a done context: %v", st.startErr)
+	}
+}
+
+func TestStarterRenewsLease(t *testing.T) {
+	st := &fakeRunStore{fakeRecorder: &fakeRecorder{}}
+	src := &chanSource{ch: make(chan ingest.Message)}
+	s := ingest.NewStarter(st, ingest.StarterConfig{Source: src, LeaseRenewInterval: time.Millisecond})
+	t.Cleanup(s.Stop)
+
+	if err := s.Start(t.Context()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitFor(t, "lease renewals", func() bool { return st.renewCount() >= 3 })
+
+	// Renewals stop with the run.
+	close(src.ch)
+	waitFor(t, "run to finish", func() bool {
+		_, _, finished, _ := st.snapshot()
+		return finished
+	})
+	s.Stop()
+	n := st.renewCount()
+	time.Sleep(20 * time.Millisecond)
+	if got := st.renewCount(); got != n {
+		t.Errorf("lease renewed %d times after the run ended", got-n)
+	}
+}
+
+// TestStarterStopsReplacedRun checks that a run is cancelled once renewing its
+// lease shows that another run has replaced it.
+func TestStarterStopsReplacedRun(t *testing.T) {
+	st := &fakeRunStore{fakeRecorder: &fakeRecorder{}, renewErr: store.ErrNotRunning}
+	s := ingest.NewStarter(st, ingest.StarterConfig{
+		Source:             &chanSource{ch: make(chan ingest.Message)}, // never ends by itself
+		LeaseRenewInterval: time.Millisecond,
+	})
+	t.Cleanup(s.Stop)
+
+	if err := s.Start(t.Context()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitFor(t, "run to be cancelled", func() bool {
+		_, _, _, failed := st.snapshot()
+		return strings.Contains(failed, "context canceled")
+	})
+	if got := st.renewCount(); got != 1 {
+		t.Errorf("RenewLease called %d times, want 1", got)
+	}
+}
+
+// TestStarterKeepsRenewingAfterErrors checks that a failed renewal other than
+// ErrNotRunning doesn't stop the run.
+func TestStarterKeepsRenewingAfterErrors(t *testing.T) {
+	st := &fakeRunStore{fakeRecorder: &fakeRecorder{}, renewErr: errors.New("connection refused")}
+	s := ingest.NewStarter(st, ingest.StarterConfig{
+		Source:             &chanSource{ch: make(chan ingest.Message)},
+		LeaseRenewInterval: time.Millisecond,
+	})
+	t.Cleanup(s.Stop)
+
+	if err := s.Start(t.Context()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitFor(t, "lease renewals", func() bool { return st.renewCount() >= 3 })
+	if _, _, finished, failed := st.snapshot(); finished || failed != "" {
+		t.Errorf("finished = %v, failed = %q; want the run still in progress", finished, failed)
+	}
 }

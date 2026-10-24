@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"strconv"
@@ -29,6 +30,8 @@ type keys struct {
 	seen      string // set: dedup keys seen so far
 	senders   string // sorted set: sender -> count of distinct emails
 	err       string // string: reason passed to Fail
+	owner     string // string: token of the current or last run
+	lease     string // string with a TTL: exists while the running run is alive
 }
 
 // NewRedis returns a Store that keeps its data in client under keys starting with {prefix}.
@@ -45,46 +48,83 @@ func NewRedis(client redis.UniversalClient, prefix string) *Redis {
 			seen:      k("seen"),
 			senders:   k("senders"),
 			err:       k("error"),
+			owner:     k("owner"),
+			lease:     k("lease"),
 		},
 	}
 }
 
-// startScript starts a run unless one is running or finished.
-// It returns 1 on success, 0 if refused.
+// startScript starts a run with the token in ARGV[2], unless a run is finished
+// or running with a live lease. It returns 1 on success, 0 if refused.
 var startScript = redis.NewScript(`
 local state = redis.call('GET', KEYS[1])
-if state == 'running' or state == 'finished' then
+if state == 'finished' or (state == 'running' and redis.call('EXISTS', KEYS[10]) == 1) then
 	return 0
 end
 redis.call('UNLINK', KEYS[3], KEYS[4], KEYS[5], KEYS[6], KEYS[7], KEYS[8])
 redis.call('SET', KEYS[2], ARGV[1])
+redis.call('SET', KEYS[9], ARGV[2])
+redis.call('SET', KEYS[10], ARGV[2], 'PX', ARGV[3])
 redis.call('SET', KEYS[1], 'running')
 return 1
 `)
 
-func (r *Redis) TryStart(ctx context.Context, dedupMode string) error {
+func (r *Redis) TryStart(ctx context.Context, dedupMode string) (Run, error) {
 	k := r.keys
+	token := rand.Text()
 	ok, err := startScript.Run(ctx, r.client,
-		[]string{k.state, k.mode, k.processed, k.unique, k.skipped, k.seen, k.senders, k.err},
-		dedupMode).Int()
+		[]string{k.state, k.mode, k.processed, k.unique, k.skipped, k.seen, k.senders, k.err, k.owner, k.lease},
+		dedupMode, token, LeaseTTL.Milliseconds()).Int()
 	if err != nil {
-		return fmt.Errorf("start: %w", err)
+		return nil, fmt.Errorf("start: %w", err)
 	}
 	if ok == 0 {
-		return ErrAlreadyStarted
+		return nil, ErrAlreadyStarted
+	}
+	return &redisRun{r: r, token: token}, nil
+}
+
+// redisRun is a Run whose token identifies it in the owner key. Its scripts
+// only act while the run is in progress and still owned by the token.
+type redisRun struct {
+	r     *Redis
+	token string
+}
+
+var _ Run = (*redisRun)(nil)
+
+// renewScript sets the lease of the run with the token in ARGV[1] to ARGV[2] ms.
+// It returns 1 on success, 0 if the run isn't in progress.
+var renewScript = redis.NewScript(`
+if redis.call('GET', KEYS[1]) ~= 'running' or redis.call('GET', KEYS[2]) ~= ARGV[1] then
+	return 0
+end
+redis.call('SET', KEYS[3], ARGV[1], 'PX', ARGV[2])
+return 1
+`)
+
+func (run *redisRun) RenewLease(ctx context.Context) error {
+	k := run.r.keys
+	ok, err := renewScript.Run(ctx, run.r.client, []string{k.state, k.owner, k.lease},
+		run.token, LeaseTTL.Milliseconds()).Int()
+	if err != nil {
+		return fmt.Errorf("renew lease: %w", err)
+	}
+	if ok == 0 {
+		return ErrNotRunning
 	}
 	return nil
 }
 
-// recordScript counts a batch of records given as ARGV pairs (key, from).
-// The whole batch is applied atomically, and only while the run is in progress.
-// It returns 1 on success, 0 if no run is in progress.
+// recordScript counts a batch of records given as ARGV pairs (key, from)
+// after the token in ARGV[1]. The whole batch is applied atomically, and only
+// while the run is in progress. It returns 1 on success, 0 if it isn't.
 var recordScript = redis.NewScript(`
-if redis.call('GET', KEYS[1]) ~= 'running' then
+if redis.call('GET', KEYS[1]) ~= 'running' or redis.call('GET', KEYS[7]) ~= ARGV[1] then
 	return 0
 end
 local unique, skipped = 0, 0
-for i = 1, #ARGV, 2 do
+for i = 2, #ARGV, 2 do
 	if redis.call('SADD', KEYS[5], ARGV[i]) == 1 then
 		unique = unique + 1
 		if ARGV[i + 1] == '' then
@@ -94,23 +134,24 @@ for i = 1, #ARGV, 2 do
 		end
 	end
 end
-redis.call('INCRBY', KEYS[2], #ARGV / 2)
+redis.call('INCRBY', KEYS[2], (#ARGV - 1) / 2)
 redis.call('INCRBY', KEYS[3], unique)
 redis.call('INCRBY', KEYS[4], skipped)
 return 1
 `)
 
-func (r *Redis) RecordBatch(ctx context.Context, records []Record) error {
+func (run *redisRun) RecordBatch(ctx context.Context, records []Record) error {
 	if len(records) == 0 {
 		return nil
 	}
-	args := make([]any, 0, 2*len(records))
+	args := make([]any, 0, 1+2*len(records))
+	args = append(args, run.token)
 	for _, rec := range records {
 		args = append(args, rec.Key, rec.From)
 	}
-	k := r.keys
-	ok, err := recordScript.Run(ctx, r.client,
-		[]string{k.state, k.processed, k.unique, k.skipped, k.seen, k.senders},
+	k := run.r.keys
+	ok, err := recordScript.Run(ctx, run.r.client,
+		[]string{k.state, k.processed, k.unique, k.skipped, k.seen, k.senders, k.owner},
 		args...).Int()
 	if err != nil {
 		return fmt.Errorf("record batch: %w", err)
@@ -121,27 +162,31 @@ func (r *Redis) RecordBatch(ctx context.Context, records []Record) error {
 	return nil
 }
 
-// endScript moves a running run to the state in ARGV[1] with the reason in ARGV[2].
-// It returns 1 on success, 0 if no run is in progress.
+// endScript moves the run with the token in ARGV[3] to the state in ARGV[1]
+// with the reason in ARGV[2], and drops its lease.
+// It returns 1 on success, 0 if the run isn't in progress.
 var endScript = redis.NewScript(`
-if redis.call('GET', KEYS[1]) ~= 'running' then
+if redis.call('GET', KEYS[1]) ~= 'running' or redis.call('GET', KEYS[3]) ~= ARGV[3] then
 	return 0
 end
 redis.call('SET', KEYS[1], ARGV[1])
 redis.call('SET', KEYS[2], ARGV[2])
+redis.call('DEL', KEYS[4])
 return 1
 `)
 
-func (r *Redis) Finish(ctx context.Context) error {
-	return r.end(ctx, StateFinished, "")
+func (run *redisRun) Finish(ctx context.Context) error {
+	return run.end(ctx, StateFinished, "")
 }
 
-func (r *Redis) Fail(ctx context.Context, reason string) error {
-	return r.end(ctx, StateFailed, reason)
+func (run *redisRun) Fail(ctx context.Context, reason string) error {
+	return run.end(ctx, StateFailed, reason)
 }
 
-func (r *Redis) end(ctx context.Context, state State, reason string) error {
-	ok, err := endScript.Run(ctx, r.client, []string{r.keys.state, r.keys.err}, string(state), reason).Int()
+func (run *redisRun) end(ctx context.Context, state State, reason string) error {
+	k := run.r.keys
+	ok, err := endScript.Run(ctx, run.r.client, []string{k.state, k.err, k.owner, k.lease},
+		string(state), reason, run.token).Int()
 	if err != nil {
 		return fmt.Errorf("set state %s: %w", state, err)
 	}

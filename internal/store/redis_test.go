@@ -21,6 +21,20 @@ func newStore(t *testing.T) *store.Redis {
 	return store.NewRedis(redistest.Client(t), redistest.Prefix(t))
 }
 
+// leaseKey returns the key holding the lease of the stores with prefix.
+func leaseKey(prefix string) string {
+	return "{" + prefix + "}:lease"
+}
+
+func mustStart(t *testing.T, s store.Store, dedupMode string) store.Run {
+	t.Helper()
+	run, err := s.TryStart(t.Context(), dedupMode)
+	if err != nil {
+		t.Fatalf("TryStart: %v", err)
+	}
+	return run
+}
+
 func mustStatus(t *testing.T, s store.Store) store.Status {
 	t.Helper()
 	st, err := s.Status(t.Context())
@@ -39,10 +53,28 @@ func mustTop(t *testing.T, s store.Store, n int) []store.SenderCount {
 	return top
 }
 
-func mustRecord(t *testing.T, s store.Store, records ...store.Record) {
+func mustRecord(t *testing.T, run store.Run, records ...store.Record) {
 	t.Helper()
-	if err := s.RecordBatch(t.Context(), records); err != nil {
+	if err := run.RecordBatch(t.Context(), records); err != nil {
 		t.Fatalf("RecordBatch: %v", err)
+	}
+}
+
+// checkEnded checks that all of run's methods report that it isn't running.
+func checkEnded(t *testing.T, run store.Run) {
+	t.Helper()
+	ctx := t.Context()
+	if err := run.RecordBatch(ctx, []store.Record{{Key: "late", From: "a@enron.com"}}); !errors.Is(err, store.ErrNotRunning) {
+		t.Errorf("RecordBatch: err = %v, want ErrNotRunning", err)
+	}
+	if err := run.RenewLease(ctx); !errors.Is(err, store.ErrNotRunning) {
+		t.Errorf("RenewLease: err = %v, want ErrNotRunning", err)
+	}
+	if err := run.Finish(ctx); !errors.Is(err, store.ErrNotRunning) {
+		t.Errorf("Finish: err = %v, want ErrNotRunning", err)
+	}
+	if err := run.Fail(ctx, "late"); !errors.Is(err, store.ErrNotRunning) {
+		t.Errorf("Fail: err = %v, want ErrNotRunning", err)
 	}
 }
 
@@ -59,25 +91,22 @@ func TestInitialState(t *testing.T) {
 
 func TestRecordBatch(t *testing.T) {
 	s := newStore(t)
-	ctx := t.Context()
-	if err := s.TryStart(ctx, "content"); err != nil {
-		t.Fatalf("TryStart: %v", err)
-	}
+	run := mustStart(t, s, "content")
 
-	mustRecord(t, s,
+	mustRecord(t, run,
 		store.Record{Key: "k1", From: "a@enron.com"},
 		store.Record{Key: "k2", From: "a@enron.com"},
 		store.Record{Key: "k1", From: "a@enron.com"}, // duplicate within the batch
 		store.Record{Key: "k3", From: "b@enron.com"},
 		store.Record{Key: "k4", From: ""},
 	)
-	mustRecord(t, s,
+	mustRecord(t, run,
 		store.Record{Key: "k3", From: "b@enron.com"}, // duplicate across batches
 		store.Record{Key: "k4", From: ""},            // duplicate without sender
 		store.Record{Key: "k5", From: "c@enron.com"},
 		store.Record{Key: "k6", From: "b@enron.com"},
 	)
-	mustRecord(t, s) // empty batch is a no-op
+	mustRecord(t, run) // empty batch is a no-op
 
 	want := store.Status{State: store.StateRunning, DedupMode: "content", Processed: 9, Unique: 6, Skipped: 1}
 	if got := mustStatus(t, s); got != want {
@@ -91,9 +120,7 @@ func TestRecordBatch(t *testing.T) {
 
 func TestTopSendersLimit(t *testing.T) {
 	s := newStore(t)
-	if err := s.TryStart(t.Context(), "content"); err != nil {
-		t.Fatalf("TryStart: %v", err)
-	}
+	run := mustStart(t, s, "content")
 	// Sender i sends i emails.
 	var records []store.Record
 	for i := 1; i <= 12; i++ {
@@ -101,7 +128,7 @@ func TestTopSendersLimit(t *testing.T) {
 			records = append(records, store.Record{Key: fmt.Sprintf("s%d-%d", i, j), From: fmt.Sprintf("s%d@enron.com", i)})
 		}
 	}
-	mustRecord(t, s, records...)
+	mustRecord(t, run, records...)
 
 	top := mustTop(t, s, 10)
 	if len(top) != 10 {
@@ -122,40 +149,23 @@ func TestLifecycle(t *testing.T) {
 	s := newStore(t)
 	ctx := t.Context()
 
-	// Nothing to record, finish or fail before a run starts.
-	if err := s.RecordBatch(ctx, []store.Record{{Key: "k", From: "a@enron.com"}}); !errors.Is(err, store.ErrNotRunning) {
-		t.Errorf("RecordBatch before start: err = %v, want ErrNotRunning", err)
-	}
-	if err := s.Finish(ctx); !errors.Is(err, store.ErrNotRunning) {
-		t.Errorf("Finish before start: err = %v, want ErrNotRunning", err)
-	}
-	if err := s.Fail(ctx, "boom"); !errors.Is(err, store.ErrNotRunning) {
-		t.Errorf("Fail before start: err = %v, want ErrNotRunning", err)
-	}
-
 	// First run fails part-way.
-	if err := s.TryStart(ctx, "message_id"); err != nil {
-		t.Fatalf("TryStart: %v", err)
-	}
-	if err := s.TryStart(ctx, "content"); !errors.Is(err, store.ErrAlreadyStarted) {
+	first := mustStart(t, s, "message_id")
+	if _, err := s.TryStart(ctx, "content"); !errors.Is(err, store.ErrAlreadyStarted) {
 		t.Errorf("TryStart while running: err = %v, want ErrAlreadyStarted", err)
 	}
-	mustRecord(t, s, store.Record{Key: "k1", From: "a@enron.com"}, store.Record{Key: "k2", From: ""})
-	if err := s.Fail(ctx, "archive truncated"); err != nil {
+	mustRecord(t, first, store.Record{Key: "k1", From: "a@enron.com"}, store.Record{Key: "k2", From: ""})
+	if err := first.Fail(ctx, "archive truncated"); err != nil {
 		t.Fatalf("Fail: %v", err)
 	}
 	want := store.Status{State: store.StateFailed, DedupMode: "message_id", Processed: 2, Unique: 2, Skipped: 1, Error: "archive truncated"}
 	if got := mustStatus(t, s); got != want {
 		t.Errorf("Status after Fail = %+v, want %+v", got, want)
 	}
-	if err := s.RecordBatch(ctx, []store.Record{{Key: "k3", From: "a@enron.com"}}); !errors.Is(err, store.ErrNotRunning) {
-		t.Errorf("RecordBatch after Fail: err = %v, want ErrNotRunning", err)
-	}
+	checkEnded(t, first)
 
 	// A failed run can be restarted; its data is discarded, so k1 counts again.
-	if err := s.TryStart(ctx, "content"); err != nil {
-		t.Fatalf("TryStart after Fail: %v", err)
-	}
+	second := mustStart(t, s, "content")
 	want = store.Status{State: store.StateRunning, DedupMode: "content"}
 	if got := mustStatus(t, s); got != want {
 		t.Errorf("Status after restart = %+v, want %+v", got, want)
@@ -163,8 +173,9 @@ func TestLifecycle(t *testing.T) {
 	if top := mustTop(t, s, 10); len(top) != 0 {
 		t.Errorf("TopSenders after restart = %v, want empty", top)
 	}
-	mustRecord(t, s, store.Record{Key: "k1", From: "a@enron.com"})
-	if err := s.Finish(ctx); err != nil {
+	checkEnded(t, first) // the first run can't touch the second one
+	mustRecord(t, second, store.Record{Key: "k1", From: "a@enron.com"})
+	if err := second.Finish(ctx); err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
 	want = store.Status{State: store.StateFinished, DedupMode: "content", Processed: 1, Unique: 1}
@@ -173,14 +184,82 @@ func TestLifecycle(t *testing.T) {
 	}
 
 	// A finished run can't be restarted or changed.
-	if err := s.TryStart(ctx, "content"); !errors.Is(err, store.ErrAlreadyStarted) {
+	if _, err := s.TryStart(ctx, "content"); !errors.Is(err, store.ErrAlreadyStarted) {
 		t.Errorf("TryStart after Finish: err = %v, want ErrAlreadyStarted", err)
 	}
-	if err := s.Fail(ctx, "late"); !errors.Is(err, store.ErrNotRunning) {
-		t.Errorf("Fail after Finish: err = %v, want ErrNotRunning", err)
+	checkEnded(t, second)
+	if got := mustStatus(t, s); got != want {
+		t.Errorf("Status after late calls = %+v, want %+v", got, want)
 	}
-	if got := mustStatus(t, s).State; got != store.StateFinished {
-		t.Errorf("State = %s, want finished", got)
+}
+
+func TestLease(t *testing.T) {
+	client := redistest.Client(t)
+	prefix := redistest.Prefix(t)
+	s := store.NewRedis(client, prefix)
+	ctx := t.Context()
+
+	checkTTL := func(when string) {
+		t.Helper()
+		ttl, err := client.PTTL(ctx, leaseKey(prefix)).Result()
+		if err != nil {
+			t.Fatalf("PTTL: %v", err)
+		}
+		if ttl <= 0 || ttl > store.LeaseTTL {
+			t.Errorf("lease TTL %s = %v, want in (0, %v]", when, ttl, store.LeaseTTL)
+		}
+	}
+
+	run := mustStart(t, s, "content")
+	checkTTL("after start")
+
+	// A run whose lease lapsed but wasn't replaced can carry on.
+	client.Del(ctx, leaseKey(prefix))
+	if err := run.RenewLease(ctx); err != nil {
+		t.Fatalf("RenewLease: %v", err)
+	}
+	checkTTL("after renewal")
+	if _, err := s.TryStart(ctx, "content"); !errors.Is(err, store.ErrAlreadyStarted) {
+		t.Errorf("TryStart with a renewed lease: err = %v, want ErrAlreadyStarted", err)
+	}
+
+	// Ending the run drops the lease.
+	if err := run.Fail(ctx, "boom"); err != nil {
+		t.Fatalf("Fail: %v", err)
+	}
+	if client.Exists(ctx, leaseKey(prefix)).Val() != 0 {
+		t.Errorf("lease exists after Fail")
+	}
+}
+
+// TestAbandonedRunIsReplaced checks that once a run's lease has expired,
+// e.g. because its process died, another instance can start a new run, and
+// the old run can no longer change anything.
+func TestAbandonedRunIsReplaced(t *testing.T) {
+	client := redistest.Client(t)
+	prefix := redistest.Prefix(t)
+	// Two stores with the same prefix act as two app instances.
+	a := store.NewRedis(client, prefix)
+	b := store.NewRedis(client, prefix)
+	ctx := t.Context()
+
+	old := mustStart(t, a, "message_id")
+	mustRecord(t, old, store.Record{Key: "k1", From: "a@enron.com"})
+	if _, err := b.TryStart(ctx, "content"); !errors.Is(err, store.ErrAlreadyStarted) {
+		t.Errorf("TryStart with a live lease: err = %v, want ErrAlreadyStarted", err)
+	}
+
+	client.Del(ctx, leaseKey(prefix)) // as if the lease expired
+	replacement := mustStart(t, b, "content")
+	checkEnded(t, old)
+	mustRecord(t, replacement, store.Record{Key: "k2", From: "b@enron.com"})
+
+	want := store.Status{State: store.StateRunning, DedupMode: "content", Processed: 1, Unique: 1}
+	if got := mustStatus(t, a); got != want {
+		t.Errorf("Status = %+v, want %+v", got, want)
+	}
+	if got, want := mustTop(t, a, 10), []store.SenderCount{{"b@enron.com", 1}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("TopSenders = %v, want %v", got, want)
 	}
 }
 
@@ -188,9 +267,7 @@ func TestStoresAreIsolatedByPrefix(t *testing.T) {
 	client := redistest.Client(t)
 	a := store.NewRedis(client, redistest.Prefix(t))
 	b := store.NewRedis(client, redistest.Prefix(t))
-	if err := a.TryStart(t.Context(), "content"); err != nil {
-		t.Fatalf("TryStart: %v", err)
-	}
+	mustStart(t, a, "content")
 	if got := mustStatus(t, b).State; got != store.StateNotStarted {
 		t.Errorf("other store's State = %s, want not_started", got)
 	}
