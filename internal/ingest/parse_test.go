@@ -246,8 +246,8 @@ func TestParseTruncatedFile(t *testing.T) {
 					calls++
 					return nil
 				})
-				if !errors.Is(err, io.ErrUnexpectedEOF) {
-					t.Errorf("err = %v, want %v", err, io.ErrUnexpectedEOF)
+				if !errors.Is(err, io.ErrUnexpectedEOF) || !errors.Is(err, ingest.ErrReadArchive) {
+					t.Errorf("err = %v, want %v and ErrReadArchive", err, io.ErrUnexpectedEOF)
 				}
 				if calls != 0 {
 					t.Errorf("callback called %d times, want 0", calls)
@@ -265,11 +265,13 @@ func TestParseErrors(t *testing.T) {
 		mode ingest.DedupMode
 		// want is the error Parse must wrap.
 		want error
+		// archive is whether the error must also wrap ErrReadArchive.
+		archive bool
 	}{
-		{"not gzip", []byte("plain text"), ingest.DedupContent, gzip.ErrHeader},
+		{"not gzip", []byte("plain text"), ingest.DedupContent, gzip.ErrHeader, true},
 		// Cut inside the first tar header, before any file.
-		{"truncated tar header", valid[:40], ingest.DedupContent, io.ErrUnexpectedEOF},
-		{"unknown mode", valid, ingest.DedupMode("subject"), ingest.ErrUnknownMode},
+		{"truncated tar header", valid[:40], ingest.DedupContent, io.ErrUnexpectedEOF, true},
+		{"unknown mode", valid, ingest.DedupMode("subject"), ingest.ErrUnknownMode, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -280,6 +282,9 @@ func TestParseErrors(t *testing.T) {
 			})
 			if !errors.Is(err, tt.want) {
 				t.Errorf("err = %v, want %v", err, tt.want)
+			}
+			if got := errors.Is(err, ingest.ErrReadArchive); got != tt.archive {
+				t.Errorf("errors.Is(err, ErrReadArchive) = %v, want %v", got, tt.archive)
 			}
 			if calls != 0 {
 				t.Errorf("callback called %d times, want 0", calls)

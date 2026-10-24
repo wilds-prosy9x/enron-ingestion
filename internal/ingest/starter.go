@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wilds-prosy9x/enron-ingestion/internal/source"
 	"github.com/wilds-prosy9x/enron-ingestion/internal/store"
 )
 
@@ -76,6 +77,7 @@ func (s *Starter) Start(ctx context.Context) error {
 		Recorder:      run,
 		BatchSize:     s.cfg.BatchSize,
 		FlushInterval: s.cfg.FlushInterval,
+		FailReason:    failReason,
 	}
 	s.wg.Add(1)
 	go func() {
@@ -100,6 +102,22 @@ func (s *Starter) Start(ctx context.Context) error {
 		slog.Info("ingestion finished", "duration", time.Since(start))
 	}()
 	return nil
+}
+
+// failReason returns the reason recorded for a run that failed with err. API
+// clients see it, so it only names the kind of failure, leaving out details
+// such as storage addresses and bucket URLs; the full error is logged.
+func failReason(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "ingestion cancelled"
+	case errors.Is(err, source.ErrNotFound):
+		return "dataset archive not found"
+	case errors.Is(err, ErrReadArchive):
+		return "dataset archive could not be read"
+	default:
+		return "internal error"
+	}
 }
 
 // keepLease renews run's lease until ctx is done. If the run has been replaced

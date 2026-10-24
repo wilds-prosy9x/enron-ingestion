@@ -269,6 +269,30 @@ func TestRunnerSourceError(t *testing.T) {
 	checkEndCtx(t, rec)
 }
 
+func TestRunnerFailReason(t *testing.T) {
+	rec := &fakeRecorder{}
+	readErr := errors.New("archive truncated")
+	var gotErr error
+	r := &ingest.Runner{
+		Source:   &chanSource{ch: messages(0), err: readErr},
+		Recorder: rec,
+		FailReason: func(err error) string {
+			gotErr = err
+			return "custom reason"
+		},
+	}
+
+	if err := r.Run(t.Context()); !errors.Is(err, readErr) {
+		t.Fatalf("Run: err = %v, want %v", err, readErr)
+	}
+	if !errors.Is(gotErr, readErr) {
+		t.Errorf("FailReason got %v, want %v", gotErr, readErr)
+	}
+	if _, _, _, failed := rec.snapshot(); failed != "custom reason" {
+		t.Errorf("failed = %q, want %q", failed, "custom reason")
+	}
+}
+
 func TestRunnerFailError(t *testing.T) {
 	readErr := errors.New("archive truncated")
 	failErr := errors.New("redis down")

@@ -126,7 +126,16 @@ curl localhost:8080/status
 | `dedup_mode`              | string  | `DEDUP_MODE` of the current or last run; omitted before the first run    |
 | `processed_message_count` | integer | Number of email messages processed so far, including copies             |
 | `unique_message_count`    | integer | Number of distinct emails so far                                         |
-| `error`                   | string  | Why the run failed; only present when `state` is `failed`                |
+| `error`                   | string  | Why the run failed; only present when `state` is `failed`. See below     |
+
+When a run fails, `error` is one of the following; the full error is only logged:
+
+| `error`                             | Meaning                                                                    |
+|-------------------------------------|----------------------------------------------------------------------------|
+| `dataset archive not found`         | There is no `DATASET_KEY` in `DATASET_BUCKET`                              |
+| `dataset archive could not be read` | The archive is corrupt or truncated, or reading it failed                  |
+| `ingestion cancelled`               | The server shut down during the run                                        |
+| `internal error`                    | Anything else, e.g. Redis or storage access failing                        |
 
 The counts are updated in batches, at least every half second while the run is in progress.
 

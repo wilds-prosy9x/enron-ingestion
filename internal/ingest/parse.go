@@ -27,8 +27,13 @@ const (
 	DedupContent DedupMode = "content"
 )
 
-// ErrUnknownMode is returned by Parse when given a DedupMode it doesn't support.
-var ErrUnknownMode = errors.New("unknown dedup mode")
+var (
+	// ErrUnknownMode is returned by Parse when given a DedupMode it doesn't support.
+	ErrUnknownMode = errors.New("unknown dedup mode")
+	// ErrReadArchive is wrapped by the errors Parse returns when the archive is
+	// corrupt or truncated, or reading it fails.
+	ErrReadArchive = errors.New("read archive")
+)
 
 // Message holds the fields extracted from one email in the archive.
 type Message struct {
@@ -50,7 +55,7 @@ func Parse(r io.Reader, mode DedupMode, fn func(Message) error) error {
 	}
 	gz, err := gzip.NewReader(r)
 	if err != nil {
-		return fmt.Errorf("open gzip: %w", err)
+		return fmt.Errorf("%w: open gzip: %w", ErrReadArchive, err)
 	}
 	defer gz.Close()
 
@@ -62,7 +67,7 @@ func Parse(r io.Reader, mode DedupMode, fn func(Message) error) error {
 			return nil
 		}
 		if err != nil {
-			return fmt.Errorf("read tar: %w", err)
+			return fmt.Errorf("%w: read tar: %w", ErrReadArchive, err)
 		}
 		if hdr.Typeflag != tar.TypeReg {
 			continue
@@ -76,7 +81,7 @@ func Parse(r io.Reader, mode DedupMode, fn func(Message) error) error {
 		// before fn sees an incomplete email.
 		_, _ = io.Copy(io.Discard, er)
 		if er.err != nil {
-			return fmt.Errorf("read %s: %w", hdr.Name, er.err)
+			return fmt.Errorf("%w: read %s: %w", ErrReadArchive, hdr.Name, er.err)
 		}
 		if err := fn(msg); err != nil {
 			return err
@@ -107,7 +112,7 @@ func parseMessage(path string, r io.Reader, mode DedupMode, h hash.Hash) (Messag
 		}
 		// An error here means the archive itself is broken, so stop.
 		if _, err := io.Copy(h, m.Body); err != nil {
-			return Message{}, fmt.Errorf("read %s: %w", path, err)
+			return Message{}, fmt.Errorf("%w: read %s: %w", ErrReadArchive, path, err)
 		}
 		msg.Key = sumKey(h)
 	}

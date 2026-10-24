@@ -209,8 +209,8 @@ func TestFailedRunCanRestart(t *testing.T) {
 		t.Fatalf("POST /start: status = %d, want %d (body %v)", code, http.StatusAccepted, body)
 	}
 	body := waitForStatus(t, url, stateIs("failed"))
-	if msg, _ := body["error"].(string); !strings.Contains(msg, "not found") {
-		t.Errorf("error = %q, want it to mention the missing archive", msg)
+	if msg := body["error"]; msg != "dataset archive not found" {
+		t.Errorf("error = %v, want %q", msg, "dataset archive not found")
 	}
 
 	writeArchive(t, filepath.Join(dir, "enron.tar.gz"), map[string]string{

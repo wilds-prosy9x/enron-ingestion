@@ -3,13 +3,15 @@ package ingest_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"reflect"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/wilds-prosy9x/enron-ingestion/internal/ingest"
+	"github.com/wilds-prosy9x/enron-ingestion/internal/source"
 	"github.com/wilds-prosy9x/enron-ingestion/internal/store"
 )
 
@@ -110,7 +112,7 @@ func TestStarterStopCancelsRun(t *testing.T) {
 	if !reflect.DeepEqual(got, keys(0, 1)) && !reflect.DeepEqual(got, keys(0, 2)) {
 		t.Errorf("keys = %v, want %v or %v", got, keys(0, 1), keys(0, 2))
 	}
-	if finished || !strings.Contains(failed, "context canceled") {
+	if finished || failed != "ingestion cancelled" {
 		t.Errorf("finished = %v, failed = %q; want failed with the cancellation", finished, failed)
 	}
 
@@ -183,10 +185,43 @@ func TestStarterStopsReplacedRun(t *testing.T) {
 	}
 	waitFor(t, "run to be cancelled", func() bool {
 		_, _, _, failed := st.snapshot()
-		return strings.Contains(failed, "context canceled")
+		return failed == "ingestion cancelled"
 	})
 	if got := st.renewCount(); got != 1 {
 		t.Errorf("RenewLease called %d times, want 1", got)
+	}
+}
+
+// TestStarterFailReasons checks that a failed run records a reason that names
+// the kind of failure without the error's details.
+func TestStarterFailReasons(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"archive not found", fmt.Errorf("open enron.tar.gz in s3://secret-bucket: %w", source.ErrNotFound), "dataset archive not found"},
+		{"archive unreadable", fmt.Errorf("%w: read tar: %w", ingest.ErrReadArchive, io.ErrUnexpectedEOF), "dataset archive could not be read"},
+		{"other error", errors.New("record batch: dial tcp 10.0.0.5:6379: connection refused"), "internal error"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := &fakeRunStore{fakeRecorder: &fakeRecorder{}}
+			src := &chanSource{ch: messages(0), err: tt.err}
+			s := ingest.NewStarter(st, ingest.StarterConfig{Source: src})
+			t.Cleanup(s.Stop)
+
+			if err := s.Start(t.Context()); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			waitFor(t, "run to fail", func() bool {
+				_, _, _, failed := st.snapshot()
+				return failed != ""
+			})
+			if _, _, _, failed := st.snapshot(); failed != tt.want {
+				t.Errorf("failed = %q, want %q", failed, tt.want)
+			}
+		})
 	}
 }
 

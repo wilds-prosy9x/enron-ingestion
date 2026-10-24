@@ -33,6 +33,8 @@ type Runner struct {
 	// FlushInterval is the longest a message waits in a partial batch before
 	// being recorded, so progress stays current when the source is slow. Default 500ms.
 	FlushInterval time.Duration
+	// FailReason returns the reason passed to Recorder.Fail for err. Default err.Error().
+	FailReason func(err error) string
 }
 
 // Run ingests all messages, then marks the run finished. If reading or
@@ -60,7 +62,11 @@ func (r *Runner) Run(ctx context.Context) error {
 		// The run was ended elsewhere, so there is nothing to mark.
 		return err
 	default:
-		if failErr := r.Recorder.Fail(endCtx, err.Error()); failErr != nil {
+		reason := err.Error()
+		if r.FailReason != nil {
+			reason = r.FailReason(err)
+		}
+		if failErr := r.Recorder.Fail(endCtx, reason); failErr != nil {
 			return errors.Join(err, fmt.Errorf("mark failed: %w", failErr))
 		}
 		return err
