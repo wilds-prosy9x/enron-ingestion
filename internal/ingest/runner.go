@@ -12,7 +12,8 @@ import (
 const (
 	defaultBatchSize     = 1000
 	defaultFlushInterval = 500 * time.Millisecond
-	// endTimeout limits how long marking a run finished or failed may take.
+	// endTimeout limits how long recording after a cancellation, and marking a
+	// run finished or failed, may take.
 	endTimeout = 5 * time.Second
 )
 
@@ -35,8 +36,12 @@ type Runner struct {
 }
 
 // Run ingests all messages, then marks the run finished. If reading or
-// recording fails, or ctx is cancelled, it marks the run failed and returns
-// the error. Messages read before a failure are still recorded where possible.
+// recording fails, or ctx is cancelled before all messages are read, it marks
+// the run failed and returns the error. Messages read before a failure are
+// still recorded where possible; a batch already being recorded when ctx is
+// cancelled may be lost, depending on the Recorder.
+// After cancellation, Run waits for the Source to stop; a Source that ignores
+// ctx while blocked in a read delays it until that read returns.
 // The caller must have started the run (store.Store.TryStart) beforehand.
 func (r *Runner) Run(ctx context.Context) error {
 	err := r.ingest(ctx)
@@ -81,6 +86,10 @@ func (r *Runner) ingest(ctx context.Context) error {
 	go func() {
 		defer close(msgs)
 		readErr <- r.Source.Messages(readCtx, func(m Message) error {
+			// Checked first, as the select below picks at random when both are ready.
+			if err := readCtx.Err(); err != nil {
+				return err
+			}
 			select {
 			case msgs <- m:
 				return nil
@@ -107,22 +116,21 @@ func (r *Runner) ingest(ctx context.Context) error {
 		if len(batch) == 0 {
 			return nil
 		}
-		err := r.Recorder.RecordBatch(ctx, batch)
+		err := r.record(ctx, batch)
 		batch = batch[:0]
-		if err != nil {
-			return fmt.Errorf("record batch: %w", err)
-		}
-		return nil
+		return err
 	}
 
 	timer := time.NewTimer(flushInterval)
 	timer.Stop()
 	defer timer.Stop()
+	done := ctx.Done()
 	for {
 		select {
 		case m, ok := <-msgs:
 			if !ok {
-				// The reader finished; record what it read even if it failed.
+				// The reader finished; record what it read even if it failed
+				// or ctx was cancelled.
 				return errors.Join(<-readErr, flush())
 			}
 			if len(batch) == 0 {
@@ -139,26 +147,24 @@ func (r *Runner) ingest(ctx context.Context) error {
 			if err := flush(); err != nil {
 				return stop(err)
 			}
-		case <-ctx.Done():
-			// Record everything read before the cancellation, including messages
-			// still waiting in the channel, if the store still accepts them.
+		case <-done:
+			// Stop reading, but keep recording what was already read, including
+			// messages still waiting in the channel, until the reader returns.
 			stopReading()
-			for m := range msgs {
-				batch = append(batch, store.Record{Key: m.Key, From: m.From})
-			}
-			return stop(errors.Join(ctx.Err(), r.flushDetached(ctx, batch)))
+			done = nil
 		}
 	}
 }
 
-// flushDetached records batch with a context that isn't cancelled along with ctx.
-func (r *Runner) flushDetached(ctx context.Context, batch []store.Record) error {
-	if len(batch) == 0 {
-		return nil
+// record records batch. Once ctx is cancelled it uses a context that isn't,
+// so that messages read before the cancellation are still recorded.
+func (r *Runner) record(ctx context.Context, batch []store.Record) error {
+	if ctx.Err() != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), endTimeout)
+		defer cancel()
 	}
-	flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), endTimeout)
-	defer cancel()
-	if err := r.Recorder.RecordBatch(flushCtx, batch); err != nil {
+	if err := r.Recorder.RecordBatch(ctx, batch); err != nil {
 		return fmt.Errorf("record batch: %w", err)
 	}
 	return nil

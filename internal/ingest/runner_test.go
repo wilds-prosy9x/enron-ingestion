@@ -24,12 +24,29 @@ type fakeRecorder struct {
 	finished  bool
 	failed    string
 	recordErr func(batch int) error // optional: error for the n-th batch (0-based)
-	finishErr error
+	// beforeRecord, if set, is called at the start of each RecordBatch call
+	// with a live context, without holding mu.
+	beforeRecord func(batch int)
+	calls        int // RecordBatch calls that got past the context check
+	finishErr    error
+	failErr      error
 	// ctxErrs collects ctx.Err() seen by Finish and Fail, which should be nil.
 	ctxErrs []error
 }
 
 func (f *fakeRecorder) RecordBatch(ctx context.Context, records []store.Record) error {
+	// Like a real store, refuse a done context.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	n := f.calls
+	f.calls++
+	f.mu.Unlock()
+	if f.beforeRecord != nil {
+		f.beforeRecord(n)
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.recordErr != nil {
@@ -56,6 +73,9 @@ func (f *fakeRecorder) Fail(ctx context.Context, reason string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.ctxErrs = append(f.ctxErrs, ctx.Err())
+	if f.failErr != nil {
+		return f.failErr
+	}
 	f.failed = reason
 	return nil
 }
@@ -176,10 +196,22 @@ func TestRunnerRecordsAllInBatches(t *testing.T) {
 	checkEndCtx(t, rec)
 }
 
+func TestRunnerDefaults(t *testing.T) {
+	rec := &fakeRecorder{}
+	r := &ingest.Runner{Source: &chanSource{ch: messages(1001)}, Recorder: rec}
+
+	if err := r.Run(t.Context()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if sizes, _, _, _ := rec.snapshot(); !reflect.DeepEqual(sizes, []int{1000, 1}) {
+		t.Errorf("batch sizes = %v, want [1000 1]", sizes)
+	}
+}
+
 func TestRunnerFlushesPartialBatchAfterInterval(t *testing.T) {
 	rec := &fakeRecorder{}
 	src := &chanSource{ch: make(chan ingest.Message)}
-	r := &ingest.Runner{Source: src, Recorder: rec, BatchSize: 100, FlushInterval: 20 * time.Millisecond}
+	r := &ingest.Runner{Source: src, Recorder: rec, BatchSize: 3, FlushInterval: 20 * time.Millisecond}
 	wait := runAsync(t, t.Context(), r)
 
 	src.ch <- msg(0)
@@ -192,14 +224,24 @@ func TestRunnerFlushesPartialBatchAfterInterval(t *testing.T) {
 		t.Error("finished before the source ended")
 	}
 
-	src.ch <- msg(2)
+	// Mix full batches with flushes by the timer and at the end.
+	for i := 2; i < 7; i++ {
+		src.ch <- msg(i)
+	}
 	close(src.ch)
 	if err := wait(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	_, got, finished, _ := rec.snapshot()
-	if want := keys(0, 3); !reflect.DeepEqual(got, want) {
+	sizes, got, finished, _ := rec.snapshot()
+	// Every message is recorded exactly once.
+	if want := keys(0, 7); !reflect.DeepEqual(got, want) {
 		t.Errorf("keys = %v, want %v", got, want)
+	}
+	for _, n := range sizes {
+		if n > 3 {
+			t.Errorf("batch sizes = %v, want none above 3", sizes)
+			break
+		}
 	}
 	if !finished {
 		t.Error("not finished")
@@ -223,6 +265,20 @@ func TestRunnerSourceError(t *testing.T) {
 	}
 	if finished || !strings.Contains(failed, "archive truncated") {
 		t.Errorf("finished = %v, failed = %q; want failed with the read error", finished, failed)
+	}
+	checkEndCtx(t, rec)
+}
+
+func TestRunnerFailError(t *testing.T) {
+	readErr := errors.New("archive truncated")
+	failErr := errors.New("redis down")
+	rec := &fakeRecorder{failErr: failErr}
+	r := &ingest.Runner{Source: &chanSource{ch: messages(1), err: readErr}, Recorder: rec}
+
+	err := r.Run(t.Context())
+	// Both the cause and the failure to record it are reported.
+	if !errors.Is(err, readErr) || !errors.Is(err, failErr) {
+		t.Errorf("Run: err = %v, want both %v and %v", err, readErr, failErr)
 	}
 	checkEndCtx(t, rec)
 }
@@ -259,6 +315,7 @@ func TestRunnerRecordError(t *testing.T) {
 	if finished || !strings.Contains(failed, "redis down") {
 		t.Errorf("finished = %v, failed = %q; want failed with the record error", finished, failed)
 	}
+	checkEndCtx(t, rec)
 }
 
 func TestRunnerRunEndedElsewhere(t *testing.T) {
@@ -304,13 +361,107 @@ func TestRunnerCancelled(t *testing.T) {
 	checkEndCtx(t, rec)
 }
 
-func TestRunnerFinishError(t *testing.T) {
-	finishErr := errors.New("redis down")
-	rec := &fakeRecorder{finishErr: finishErr}
-	r := &ingest.Runner{Source: &chanSource{ch: messages(1)}, Recorder: rec}
+// cancelWhileRecording cancels the run while its first batch (k0, k1) is being
+// recorded, with k2 and k3 waiting in the runner and k4 held by the source.
+// Batches after the first fail with laterErr.
+func cancelWhileRecording(t *testing.T, laterErr error) (*fakeRecorder, error) {
+	t.Helper()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	rec := &fakeRecorder{
+		beforeRecord: func(n int) {
+			if n == 0 {
+				close(entered)
+				<-release
+			}
+		},
+		recordErr: func(batch int) error {
+			if batch > 0 {
+				return laterErr
+			}
+			return nil
+		},
+	}
+	src := &chanSource{ch: make(chan ingest.Message)}
+	// With BatchSize 2, the runner's channel holds two messages.
+	r := &ingest.Runner{Source: src, Recorder: rec, BatchSize: 2, FlushInterval: time.Hour}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	wait := runAsync(t, ctx, r)
 
-	if err := r.Run(t.Context()); !errors.Is(err, finishErr) {
-		t.Errorf("Run: err = %v, want %v", err, finishErr)
+	src.ch <- msg(0)
+	src.ch <- msg(1)
+	<-entered
+	src.ch <- msg(2)
+	src.ch <- msg(3)
+	src.ch <- msg(4) // the runner's channel is full, so the source keeps this one
+	cancel()
+	close(release)
+	return rec, wait()
+}
+
+func TestRunnerCancelledWhileRecording(t *testing.T) {
+	t.Run("records what was read", func(t *testing.T) {
+		rec, err := cancelWhileRecording(t, nil)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run: err = %v, want context.Canceled", err)
+		}
+		sizes, got, finished, failed := rec.snapshot()
+		// The waiting messages are recorded after the cancellation, still in batches.
+		if want := keys(0, 4); !reflect.DeepEqual(got, want) {
+			t.Errorf("keys = %v, want %v", got, want)
+		}
+		if want := []int{2, 2}; !reflect.DeepEqual(sizes, want) {
+			t.Errorf("batch sizes = %v, want %v", sizes, want)
+		}
+		if finished || !strings.Contains(failed, "context canceled") {
+			t.Errorf("finished = %v, failed = %q; want failed with the cancellation", finished, failed)
+		}
+		checkEndCtx(t, rec)
+	})
+
+	t.Run("run ended elsewhere", func(t *testing.T) {
+		rec, err := cancelWhileRecording(t, store.ErrNotRunning)
+		if !errors.Is(err, store.ErrNotRunning) {
+			t.Fatalf("Run: err = %v, want ErrNotRunning", err)
+		}
+		if _, _, finished, failed := rec.snapshot(); finished || failed != "" {
+			t.Errorf("finished = %v, failed = %q; want neither", finished, failed)
+		}
+	})
+
+	t.Run("record error", func(t *testing.T) {
+		recordErr := errors.New("redis down")
+		rec, err := cancelWhileRecording(t, recordErr)
+		if !errors.Is(err, recordErr) {
+			t.Fatalf("Run: err = %v, want %v", err, recordErr)
+		}
+		_, got, finished, failed := rec.snapshot()
+		if want := keys(0, 2); !reflect.DeepEqual(got, want) {
+			t.Errorf("keys = %v, want %v", got, want)
+		}
+		if finished || !strings.Contains(failed, "redis down") {
+			t.Errorf("finished = %v, failed = %q; want failed with the record error", finished, failed)
+		}
+		checkEndCtx(t, rec)
+	})
+}
+
+func TestRunnerFinishError(t *testing.T) {
+	for _, finishErr := range []error{errors.New("redis down"), store.ErrNotRunning} {
+		t.Run(finishErr.Error(), func(t *testing.T) {
+			rec := &fakeRecorder{finishErr: finishErr}
+			r := &ingest.Runner{Source: &chanSource{ch: messages(1)}, Recorder: rec}
+
+			if err := r.Run(t.Context()); !errors.Is(err, finishErr) {
+				t.Errorf("Run: err = %v, want %v", err, finishErr)
+			}
+			// A failed Finish doesn't fall back to marking the run failed.
+			if _, _, _, failed := rec.snapshot(); failed != "" {
+				t.Errorf("failed = %q, want empty", failed)
+			}
+			checkEndCtx(t, rec)
+		})
 	}
 }
 
@@ -344,6 +495,22 @@ func TestArchiveSource(t *testing.T) {
 		err := src.Messages(t.Context(), func(ingest.Message) error { return nil })
 		if !errors.Is(err, source.ErrNotFound) {
 			t.Errorf("err = %v, want ErrNotFound", err)
+		}
+	})
+
+	t.Run("stops at callback error", func(t *testing.T) {
+		src := ingest.ArchiveSource{BucketURL: "file://" + dir, Key: "enron.tar.gz", Mode: ingest.DedupContent}
+		errStop := errors.New("stop")
+		calls := 0
+		err := src.Messages(t.Context(), func(ingest.Message) error {
+			calls++
+			return errStop
+		})
+		if !errors.Is(err, errStop) {
+			t.Errorf("err = %v, want %v", err, errStop)
+		}
+		if calls != 1 {
+			t.Errorf("fn called %d times, want 1", calls)
 		}
 	})
 
