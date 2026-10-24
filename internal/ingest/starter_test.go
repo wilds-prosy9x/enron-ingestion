@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/wilds-prosy9x/enron-ingestion/internal/ingest"
 	"github.com/wilds-prosy9x/enron-ingestion/internal/store"
@@ -82,7 +83,7 @@ func TestStarterStopCancelsRun(t *testing.T) {
 	}()
 	select {
 	case <-stopped:
-	case <-t.Context().Done():
+	case <-time.After(5 * time.Second):
 		t.Fatal("Stop did not return")
 	}
 
