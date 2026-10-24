@@ -27,6 +27,9 @@ const (
 	DedupContent DedupMode = "content"
 )
 
+// ErrUnknownMode is returned by Parse when given a DedupMode it doesn't support.
+var ErrUnknownMode = errors.New("unknown dedup mode")
+
 // Message holds the fields extracted from one email in the archive.
 type Message struct {
 	// Path is the file's path inside the archive.
@@ -43,7 +46,7 @@ type Message struct {
 // Parsing stops at the first error returned by fn.
 func Parse(r io.Reader, mode DedupMode, fn func(Message) error) error {
 	if mode != DedupMessageID && mode != DedupContent {
-		return fmt.Errorf("unknown dedup mode %q", mode)
+		return fmt.Errorf("%w %q", ErrUnknownMode, mode)
 	}
 	gz, err := gzip.NewReader(r)
 	if err != nil {
@@ -143,13 +146,15 @@ func sumKey(h hash.Hash) string {
 // different field splits like ("ab", "c") and ("a", "bc") hash differently.
 func writeFields(h hash.Hash, fields ...string) {
 	for _, f := range fields {
-		h.Write([]byte(f))
+		io.WriteString(h, f)
 		h.Write([]byte{0})
 	}
 }
 
 // normaliseSender returns the lowercased email address from a From header value.
 // If the value isn't a valid address, the trimmed raw value is used instead.
+// The whole address is lowercased, although RFC 5321 lets the part before
+// the @ be case-sensitive, because in practice mail servers ignore its case.
 func normaliseSender(from string) string {
 	if addr, err := mail.ParseAddress(from); err == nil {
 		return strings.ToLower(addr.Address)

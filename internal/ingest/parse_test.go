@@ -252,16 +252,21 @@ func TestParseErrors(t *testing.T) {
 		name string
 		data []byte
 		mode ingest.DedupMode
+		// want is the error Parse must wrap, or nil if any error will do.
+		want error
 	}{
-		{"not gzip", []byte("plain text"), ingest.DedupContent},
-		{"truncated", valid[:40], ingest.DedupContent},
-		{"unknown mode", valid, ingest.DedupMode("subject")},
+		{"not gzip", []byte("plain text"), ingest.DedupContent, nil},
+		{"truncated", valid[:40], ingest.DedupContent, nil},
+		{"unknown mode", valid, ingest.DedupMode("subject"), ingest.ErrUnknownMode},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := ingest.Parse(bytes.NewReader(tt.data), tt.mode, func(ingest.Message) error { return nil })
 			if err == nil {
-				t.Error("Parse returned nil error, want an error")
+				t.Fatal("Parse returned nil error, want an error")
+			}
+			if tt.want != nil && !errors.Is(err, tt.want) {
+				t.Errorf("err = %v, want %v", err, tt.want)
 			}
 		})
 	}
