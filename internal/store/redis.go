@@ -31,6 +31,10 @@ type keys struct {
 	senders   string // sorted set: sender -> count of distinct emails
 	err       string // string: reason passed to Fail
 	lease     string // string with a TTL: token of the running run, exists while it is alive
+	// oldOwner held the run's token in earlier versions, which check it before
+	// changing anything. Starting a run deletes it, so that an instance still
+	// running an earlier version stops once its run has been replaced.
+	oldOwner string
 }
 
 // NewRedis returns a Store that keeps its data in client under keys starting with {prefix}.
@@ -48,6 +52,7 @@ func NewRedis(client redis.UniversalClient, prefix string) *Redis {
 			senders:   k("senders"),
 			err:       k("error"),
 			lease:     k("lease"),
+			oldOwner:  k("owner"),
 		},
 	}
 }
@@ -59,7 +64,7 @@ local state = redis.call('GET', KEYS[1])
 if state == 'finished' or (state == 'running' and redis.call('EXISTS', KEYS[9]) == 1) then
 	return 0
 end
-redis.call('UNLINK', KEYS[3], KEYS[4], KEYS[5], KEYS[6], KEYS[7], KEYS[8])
+redis.call('UNLINK', KEYS[3], KEYS[4], KEYS[5], KEYS[6], KEYS[7], KEYS[8], KEYS[10])
 redis.call('SET', KEYS[2], ARGV[1])
 redis.call('SET', KEYS[9], ARGV[2], 'PX', ARGV[3])
 redis.call('SET', KEYS[1], 'running')
@@ -70,7 +75,7 @@ func (r *Redis) TryStart(ctx context.Context, dedupMode string) (Run, error) {
 	k := r.keys
 	token := rand.Text()
 	ok, err := startScript.Run(ctx, r.client,
-		[]string{k.state, k.mode, k.processed, k.unique, k.skipped, k.seen, k.senders, k.err, k.lease},
+		[]string{k.state, k.mode, k.processed, k.unique, k.skipped, k.seen, k.senders, k.err, k.lease, k.oldOwner},
 		dedupMode, token, LeaseTTL.Milliseconds()).Int()
 	if err != nil {
 		return nil, fmt.Errorf("start: %w", err)

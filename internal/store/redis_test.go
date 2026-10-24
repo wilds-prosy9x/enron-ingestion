@@ -293,6 +293,26 @@ func TestAbandonedRunIsReplaced(t *testing.T) {
 	}
 }
 
+// TestStartDeletesOldOwner checks that starting a run deletes the owner key of
+// earlier versions, which they check before changing anything, so that an
+// instance running one stops once its run has been replaced.
+func TestStartDeletesOldOwner(t *testing.T) {
+	client := redistest.Client(t)
+	prefix := redistest.Prefix(t)
+	s := store.NewRedis(client, prefix)
+	ctx := t.Context()
+	ownerKey := "{" + prefix + "}:owner"
+
+	// As left by an earlier version whose run's lease has expired.
+	client.Set(ctx, "{"+prefix+"}:state", string(store.StateRunning), 0)
+	client.Set(ctx, ownerKey, "old-token", 0)
+
+	mustStart(t, s, "content")
+	if client.Exists(ctx, ownerKey).Val() != 0 {
+		t.Errorf("owner key exists after TryStart")
+	}
+}
+
 func TestStoresAreIsolatedByPrefix(t *testing.T) {
 	client := redistest.Client(t)
 	a := store.NewRedis(client, redistest.Prefix(t))
