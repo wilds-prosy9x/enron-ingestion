@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -61,7 +62,7 @@ var prefixCounter atomic.Int64
 func Prefix(t testing.TB) string {
 	t.Helper()
 	c := Client(t)
-	prefix := fmt.Sprintf("test:%s:%d", t.Name(), prefixCounter.Add(1))
+	prefix := fmt.Sprintf("test:%s:%d", safeName(t.Name()), prefixCounter.Add(1))
 	t.Cleanup(func() {
 		ctx := context.Background()
 		// Keys are written as "{prefix}:name" by store.NewRedis.
@@ -74,6 +75,21 @@ func Prefix(t testing.TB) string {
 		}
 	})
 	return prefix
+}
+
+// safeName replaces every character of a test name except letters, digits,
+// _, - and / with _, so that the prefix has no characters with a special
+// meaning in SCAN patterns (* ? [ ] \) or hash tags ({ }). The counter in the
+// prefix keeps names that end up equal apart.
+func safeName(name string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-', r == '/':
+			return r
+		default:
+			return '_'
+		}
+	}, name)
 }
 
 // Client returns the shared client, or skips the test if Redis isn't available.
