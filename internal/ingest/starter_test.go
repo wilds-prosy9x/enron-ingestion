@@ -217,9 +217,9 @@ func TestStarterRenewsLease(t *testing.T) {
 	}
 }
 
-// TestStarterStopsReplacedRun checks that a run is cancelled once renewing its
+// TestStarterStopsRunThatLostLease checks that a run is cancelled once renewing its
 // lease shows that the lease has expired or another run has replaced it.
-func TestStarterStopsReplacedRun(t *testing.T) {
+func TestStarterStopsRunThatLostLease(t *testing.T) {
 	st := &fakeRunStore{fakeRecorder: &fakeRecorder{}, renewErr: store.ErrNotRunning}
 	s := ingest.NewStarter(st, ingest.StarterConfig{
 		Source:             &chanSource{ch: make(chan ingest.Message)}, // never ends by itself

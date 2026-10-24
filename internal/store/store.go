@@ -29,8 +29,8 @@ const (
 var (
 	// ErrAlreadyStarted is returned by TryStart when a run is in progress or has finished.
 	ErrAlreadyStarted = errors.New("ingestion already started")
-	// ErrNotRunning is returned by a Run's methods once the run has ended or
-	// been replaced by another run.
+	// ErrNotRunning is returned by a Run's methods once the run has ended, its
+	// lease has expired or another run has replaced it.
 	ErrNotRunning = errors.New("ingestion not running")
 )
 
