@@ -107,6 +107,7 @@ curl -X POST localhost:8080/start
 |--------|-----------------------------------------------|
 | `202`  | The run has started                           |
 | `409`  | A run is already in progress or has finished  |
+| `503`  | The server is shutting down                   |
 
 ### `GET /status`
 

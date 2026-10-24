@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/wilds-prosy9x/enron-ingestion/internal/ingest"
 	"github.com/wilds-prosy9x/enron-ingestion/internal/server"
 	"github.com/wilds-prosy9x/enron-ingestion/internal/store"
 )
@@ -76,15 +77,28 @@ func TestRouting(t *testing.T) {
 	}
 }
 
-func TestStartConflict(t *testing.T) {
-	h := server.NewHandler(&fakeStore{}, &fakeStarter{err: store.ErrAlreadyStarted})
-
-	code, body := do(t, h, http.MethodPost, "/start")
-	if code != http.StatusConflict {
-		t.Errorf("status = %d, want %d", code, http.StatusConflict)
+func TestStartRefused(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		wantCode int
+		wantErr  string
+	}{
+		{"already started", store.ErrAlreadyStarted, http.StatusConflict, "ingestion already started"},
+		{"shutting down", ingest.ErrStopped, http.StatusServiceUnavailable, "server is shutting down"},
 	}
-	if want := map[string]any{"error": "ingestion already started"}; !reflect.DeepEqual(body, want) {
-		t.Errorf("body = %v, want %v", body, want)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := server.NewHandler(&fakeStore{}, &fakeStarter{err: tt.err})
+
+			code, body := do(t, h, http.MethodPost, "/start")
+			if code != tt.wantCode {
+				t.Errorf("status = %d, want %d", code, tt.wantCode)
+			}
+			if want := map[string]any{"error": tt.wantErr}; !reflect.DeepEqual(body, want) {
+				t.Errorf("body = %v, want %v", body, want)
+			}
+		})
 	}
 }
 

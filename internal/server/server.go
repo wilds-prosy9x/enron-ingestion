@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/wilds-prosy9x/enron-ingestion/internal/ingest"
 	"github.com/wilds-prosy9x/enron-ingestion/internal/store"
 )
 
@@ -22,7 +23,8 @@ type Store interface {
 
 // Starter starts an ingestion run. *ingest.Starter implements it.
 type Starter interface {
-	// Start returns store.ErrAlreadyStarted if a run is in progress or has finished.
+	// Start returns store.ErrAlreadyStarted if a run is in progress or has
+	// finished, and ingest.ErrStopped once the server is shutting down.
 	Start(ctx context.Context) error
 }
 
@@ -58,6 +60,8 @@ func (h *handler) start(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusAccepted, StartResponse{State: store.StateRunning})
 	case errors.Is(err, store.ErrAlreadyStarted):
 		writeJSON(w, http.StatusConflict, ErrorResponse{Error: "ingestion already started"})
+	case errors.Is(err, ingest.ErrStopped):
+		writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{Error: "server is shutting down"})
 	default:
 		internalError(w, "start ingestion", err)
 	}
