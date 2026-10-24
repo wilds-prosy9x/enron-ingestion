@@ -106,7 +106,7 @@ func parseMessage(path string, r io.Reader, mode DedupMode, h hash.Hash) (Messag
 		if _, err := io.Copy(h, m.Body); err != nil {
 			return Message{}, fmt.Errorf("read %s: %w", path, err)
 		}
-		msg.Key = hex.EncodeToString(h.Sum(nil)[:16])
+		msg.Key = sumKey(h)
 	}
 	return msg, nil
 }
@@ -126,11 +126,16 @@ func (e *errReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// hashFields returns a 128-bit hex key for the given fields.
-// Keys have a fixed length so their storage cost doesn't depend on the input.
+// hashFields returns a key for the given fields.
 func hashFields(h hash.Hash, fields ...string) string {
 	h.Reset()
 	writeFields(h, fields...)
+	return sumKey(h)
+}
+
+// sumKey returns a 128-bit hex key for the data written to h.
+// Keys have a fixed length so their storage cost doesn't depend on the input.
+func sumKey(h hash.Hash) string {
 	return hex.EncodeToString(h.Sum(nil)[:16])
 }
 
