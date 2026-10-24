@@ -95,9 +95,12 @@ func (f *fakeRecorder) snapshot() (sizes []int, keys []string, finished bool, fa
 
 // chanSource yields messages sent on ch until it is closed, then returns err.
 type chanSource struct {
-	ch  chan ingest.Message
-	err error
+	ch   chan ingest.Message
+	err  error
+	mode ingest.DedupMode
 }
+
+func (s *chanSource) DedupMode() ingest.DedupMode { return s.mode }
 
 func (s *chanSource) Messages(ctx context.Context, fn func(ingest.Message) error) error {
 	for {

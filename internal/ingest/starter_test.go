@@ -58,8 +58,8 @@ func (f *fakeRunStore) renewCount() int {
 
 func TestStarterRunsInBackground(t *testing.T) {
 	st := &fakeRunStore{fakeRecorder: &fakeRecorder{}}
-	src := &chanSource{ch: make(chan ingest.Message)}
-	s := ingest.NewStarter(st, ingest.StarterConfig{Source: src, DedupMode: ingest.DedupContent, BatchSize: 1})
+	src := &chanSource{ch: make(chan ingest.Message), mode: ingest.DedupMessageID}
+	s := ingest.NewStarter(st, ingest.StarterConfig{Source: src, BatchSize: 1})
 	t.Cleanup(s.Stop)
 
 	// The request context ending must not stop the run.
@@ -72,7 +72,8 @@ func TestStarterRunsInBackground(t *testing.T) {
 	if err := s.Start(t.Context()); !errors.Is(err, store.ErrAlreadyStarted) {
 		t.Errorf("second Start: err = %v, want ErrAlreadyStarted", err)
 	}
-	if want := []string{"content"}; !reflect.DeepEqual(st.modes, want) {
+	// The run is recorded with the source's mode.
+	if want := []string{"message_id"}; !reflect.DeepEqual(st.modes, want) {
 		t.Errorf("TryStart modes = %v, want %v", st.modes, want)
 	}
 
@@ -91,7 +92,7 @@ func TestStarterRunsInBackground(t *testing.T) {
 func TestStarterStopCancelsRun(t *testing.T) {
 	st := &fakeRunStore{fakeRecorder: &fakeRecorder{}}
 	src := &chanSource{ch: make(chan ingest.Message)}
-	s := ingest.NewStarter(st, ingest.StarterConfig{Source: src, DedupMode: ingest.DedupContent, BatchSize: 1})
+	s := ingest.NewStarter(st, ingest.StarterConfig{Source: src, BatchSize: 1})
 
 	if err := s.Start(t.Context()); err != nil {
 		t.Fatalf("Start: %v", err)

@@ -24,8 +24,7 @@ type RunStore interface {
 
 // StarterConfig configures the runs a Starter starts.
 type StarterConfig struct {
-	Source    Source
-	DedupMode DedupMode
+	Source Source
 	// BatchSize and FlushInterval are passed to the Runner; zero means its default.
 	BatchSize     int
 	FlushInterval time.Duration
@@ -67,7 +66,8 @@ func (s *Starter) Start(ctx context.Context) error {
 	// could be recorded as running with nothing running it.
 	startCtx, cancelStart := context.WithTimeout(context.WithoutCancel(ctx), startTimeout)
 	defer cancelStart()
-	run, err := s.store.TryStart(startCtx, string(s.cfg.DedupMode))
+	mode := s.cfg.Source.DedupMode()
+	run, err := s.store.TryStart(startCtx, string(mode))
 	if err != nil {
 		return err
 	}
@@ -91,7 +91,7 @@ func (s *Starter) Start(ctx context.Context) error {
 		}()
 
 		start := time.Now()
-		slog.Info("ingestion started", "dedup_mode", s.cfg.DedupMode)
+		slog.Info("ingestion started", "dedup_mode", mode)
 		err := r.Run(runCtx)
 		stopRun()
 		<-leaseDone

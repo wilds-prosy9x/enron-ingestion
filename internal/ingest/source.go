@@ -11,6 +11,9 @@ type Source interface {
 	// Messages calls fn for each message, stopping at the first error from fn.
 	// It returns that error, or any error from reading the messages.
 	Messages(ctx context.Context, fn func(Message) error) error
+	// DedupMode is how the source recognises copies of the same email, i.e.
+	// how it computes Message.Key. It is recorded with each run.
+	DedupMode() DedupMode
 }
 
 // ArchiveSource reads messages from a gzipped tar archive in local or cloud storage.
@@ -22,6 +25,8 @@ type ArchiveSource struct {
 	// Mode selects how copies of the same email are recognised.
 	Mode DedupMode
 }
+
+func (s ArchiveSource) DedupMode() DedupMode { return s.Mode }
 
 func (s ArchiveSource) Messages(ctx context.Context, fn func(Message) error) error {
 	r, err := source.Open(ctx, s.BucketURL, s.Key)

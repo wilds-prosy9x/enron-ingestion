@@ -29,7 +29,7 @@ func TestMain(m *testing.M) {
 func startApp(t *testing.T, src ingest.Source) string {
 	t.Helper()
 	st := store.NewRedis(redistest.Client(t), redistest.Prefix(t))
-	starter := ingest.NewStarter(st, ingest.StarterConfig{Source: src, DedupMode: ingest.DedupContent, BatchSize: 1})
+	starter := ingest.NewStarter(st, ingest.StarterConfig{Source: src, BatchSize: 1})
 	ts := httptest.NewServer(server.NewHandler(st, starter))
 	// Cleanups run in reverse order: stop the server, then any run.
 	t.Cleanup(starter.Stop)
@@ -234,6 +234,8 @@ func TestFailedRunCanRestart(t *testing.T) {
 
 // chanSource yields messages sent on ch until it is closed.
 type chanSource struct{ ch chan ingest.Message }
+
+func (s *chanSource) DedupMode() ingest.DedupMode { return ingest.DedupContent }
 
 func (s *chanSource) Messages(ctx context.Context, fn func(ingest.Message) error) error {
 	for {

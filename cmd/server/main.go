@@ -90,8 +90,7 @@ func run(ctx context.Context, stopSignals func()) error {
 
 	st := store.NewRedis(rdb, redisKeyPrefix)
 	starter := ingest.NewStarter(st, ingest.StarterConfig{
-		Source:    ingest.ArchiveSource{BucketURL: cfg.datasetBucket, Key: cfg.datasetKey, Mode: cfg.dedupMode},
-		DedupMode: cfg.dedupMode,
+		Source: ingest.ArchiveSource{BucketURL: cfg.datasetBucket, Key: cfg.datasetKey, Mode: cfg.dedupMode},
 	})
 	// Runs on every return, after the HTTP server has stopped: cancels a run
 	// in progress, which is then marked failed, and waits for it.
