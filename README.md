@@ -6,7 +6,7 @@ A Go service for ingesting the [Enron email dataset](https://www.cs.cmu.edu/~enr
 
 ## Requirements
 
-- Go 1.27+
+- Go 1.27.3+
 - Docker (optional, for building the container image)
 
 ## Project layout

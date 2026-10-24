@@ -42,17 +42,40 @@ func TestStatusEndpoint(t *testing.T) {
 	}
 }
 
-func TestStatusEndpointRejectsOtherMethods(t *testing.T) {
+// TestRouting checks the status codes for supported and unsupported requests.
+func TestRouting(t *testing.T) {
 	ts := httptest.NewServer(server.NewHandler())
 	t.Cleanup(ts.Close)
 
-	resp, err := ts.Client().Post(ts.URL+"/status", "application/json", nil)
-	if err != nil {
-		t.Fatalf("POST /status: %v", err)
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		want   int
+	}{
+		{"get status", http.MethodGet, "/status", http.StatusOK},
+		{"head status", http.MethodHead, "/status", http.StatusOK},
+		{"post status", http.MethodPost, "/status", http.StatusMethodNotAllowed},
+		{"put status", http.MethodPut, "/status", http.StatusMethodNotAllowed},
+		{"delete status", http.MethodDelete, "/status", http.StatusMethodNotAllowed},
+		{"unknown path", http.MethodGet, "/nope", http.StatusNotFound},
+		{"root", http.MethodGet, "/", http.StatusNotFound},
 	}
-	defer resp.Body.Close()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, err := http.NewRequestWithContext(t.Context(), tt.method, ts.URL+tt.path, nil)
+			if err != nil {
+				t.Fatalf("new request: %v", err)
+			}
+			resp, err := ts.Client().Do(req)
+			if err != nil {
+				t.Fatalf("%s %s: %v", tt.method, tt.path, err)
+			}
+			defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusMethodNotAllowed {
-		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusMethodNotAllowed)
+			if resp.StatusCode != tt.want {
+				t.Errorf("%s %s: status = %d, want %d", tt.method, tt.path, resp.StatusCode, tt.want)
+			}
+		})
 	}
 }

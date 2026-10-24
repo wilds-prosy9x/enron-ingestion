@@ -3,6 +3,7 @@ package server
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 )
 
@@ -29,12 +30,15 @@ type StatusResponse struct {
 	ProcessedMessageCount int            `json:"processed_message_count"`
 }
 
-func handleStatus(w http.ResponseWriter, r *http.Request) {
+func handleStatus(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, StatusResponse{State: StateNotStarted, ProcessedMessageCount: 0})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	// The status line has already been sent, so logging is all we can do.
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		slog.Error("write JSON response", "error", err)
+	}
 }
