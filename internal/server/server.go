@@ -67,7 +67,9 @@ func (h *handler) start(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// StatusResponse is the body returned by GET /status.
+// StatusResponse is the body returned by GET /status. It leaves out the store's
+// Skipped count (distinct emails without a usable sender) on purpose: it is an
+// internal detail, and unique_message_count already includes those emails.
 type StatusResponse struct {
 	State store.State `json:"state"`
 	// DedupMode is the mode of the current or last run; omitted before the first run.

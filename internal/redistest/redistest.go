@@ -13,8 +13,8 @@ import (
 	tcredis "github.com/testcontainers/testcontainers-go/modules/redis"
 )
 
-// Image is the Redis image the tests run against.
-const Image = "redis:7.4"
+// image is the Redis image the tests run against.
+const image = "redis:7.4"
 
 // client is shared by all tests in the package; each test should use its own
 // key prefix. It is nil if the container couldn't be started.
@@ -28,7 +28,7 @@ var (
 // If the container can't be started, the tests still run and Client skips them.
 func Run(m *testing.M) int {
 	ctx := context.Background()
-	container, err := tcredis.Run(ctx, Image)
+	container, err := tcredis.Run(ctx, image)
 	if err != nil {
 		startupErr = err
 		return m.Run()

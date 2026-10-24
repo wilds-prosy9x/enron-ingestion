@@ -97,9 +97,8 @@ func run(ctx context.Context, stopSignals func()) error {
 	// in progress, which is then marked failed, and waits for it.
 	defer starter.Stop()
 
-	addr := cfg.addr
 	srv := &http.Server{
-		Addr:              addr,
+		Addr:              cfg.addr,
 		Handler:           server.NewHandler(st, starter),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
@@ -109,7 +108,7 @@ func run(ctx context.Context, stopSignals func()) error {
 
 	serveErr := make(chan error, 1)
 	go func() {
-		slog.Info("starting server", "addr", addr)
+		slog.Info("starting server", "addr", cfg.addr)
 		serveErr <- srv.ListenAndServe()
 	}()
 
