@@ -23,6 +23,7 @@ type fakeRunStore struct {
 	running  bool
 	modes    []string
 	startErr error // ctx.Err() seen by TryStart
+	tryErr   error // optional: returned by TryStart without starting a run
 	renewErr error // optional: returned by RenewLease
 	renewals int
 }
@@ -30,6 +31,9 @@ type fakeRunStore struct {
 func (f *fakeRunStore) TryStart(ctx context.Context, dedupMode string) (store.Run, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.tryErr != nil {
+		return nil, f.tryErr
+	}
 	if f.running {
 		return nil, store.ErrAlreadyStarted
 	}
@@ -125,6 +129,41 @@ func TestStarterStopCancelsRun(t *testing.T) {
 func TestStarterStopWithoutRun(t *testing.T) {
 	s := ingest.NewStarter(&fakeRunStore{fakeRecorder: &fakeRecorder{}}, ingest.StarterConfig{})
 	s.Stop()
+}
+
+// TestStarterStartError checks that when TryStart fails, Start returns its
+// error without starting a run, and a later Start still works.
+func TestStarterStartError(t *testing.T) {
+	tryErr := errors.New("dial tcp 10.0.0.5:6379: connection refused")
+	st := &fakeRunStore{fakeRecorder: &fakeRecorder{}, tryErr: tryErr}
+	src := &chanSource{ch: make(chan ingest.Message)}
+	s := ingest.NewStarter(st, ingest.StarterConfig{Source: src, LeaseRenewInterval: time.Millisecond})
+	t.Cleanup(s.Stop)
+
+	if err := s.Start(t.Context()); !errors.Is(err, tryErr) {
+		t.Fatalf("Start: err = %v, want %v", err, tryErr)
+	}
+	// A started run would renew its lease every millisecond.
+	time.Sleep(20 * time.Millisecond)
+	if n := st.renewCount(); n != 0 {
+		t.Errorf("lease renewed %d times, want no run", n)
+	}
+
+	st.mu.Lock()
+	st.tryErr = nil
+	st.mu.Unlock()
+	if err := s.Start(t.Context()); err != nil {
+		t.Fatalf("Start after the error: %v", err)
+	}
+	src.send(t, msg(0))
+	close(src.ch)
+	waitFor(t, "run to finish", func() bool {
+		_, _, finished, _ := st.snapshot()
+		return finished
+	})
+	if _, got, _, failed := st.snapshot(); !reflect.DeepEqual(got, keys(0, 1)) || failed != "" {
+		t.Errorf("keys = %v, failed = %q; want %v and not failed", got, failed, keys(0, 1))
+	}
 }
 
 // TestStarterStartIgnoresRequestCancel checks that a cancelled request can't
