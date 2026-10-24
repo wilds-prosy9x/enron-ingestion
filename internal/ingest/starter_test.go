@@ -25,7 +25,10 @@ type fakeRunStore struct {
 	startErr error // ctx.Err() seen by TryStart
 	tryErr   error // optional: returned by TryStart without starting a run
 	renewErr error // optional: returned by RenewLease
-	renewals int
+	// renewFailures optionally limits renewErr to the first renewFailures renewals.
+	renewFailures int
+	renewals      int
+	renewTimes    []time.Time
 }
 
 func (f *fakeRunStore) TryStart(ctx context.Context, dedupMode string) (store.Run, error) {
@@ -47,6 +50,10 @@ func (f *fakeRunStore) RenewLease(context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.renewals++
+	f.renewTimes = append(f.renewTimes, time.Now())
+	if f.renewFailures > 0 && f.renewals > f.renewFailures {
+		return nil
+	}
 	return f.renewErr
 }
 
@@ -281,5 +288,38 @@ func TestStarterKeepsRenewingAfterErrors(t *testing.T) {
 	waitFor(t, "lease renewals", func() bool { return st.renewCount() >= 3 })
 	if _, _, finished, failed := st.snapshot(); finished || failed != "" {
 		t.Errorf("finished = %v, failed = %q; want the run still in progress", finished, failed)
+	}
+}
+
+// TestStarterRetriesFailedRenewalSoon checks that a failed renewal is retried
+// after LeaseRetryInterval rather than a whole LeaseRenewInterval, so that a few
+// failures in a row don't let the lease expire, and that renewals go back to
+// LeaseRenewInterval once one succeeds.
+func TestStarterRetriesFailedRenewalSoon(t *testing.T) {
+	const interval = 200 * time.Millisecond
+	st := &fakeRunStore{fakeRecorder: &fakeRecorder{}, renewErr: errors.New("i/o timeout"), renewFailures: 3}
+	s := ingest.NewStarter(st, ingest.StarterConfig{
+		Source:             &chanSource{ch: make(chan ingest.Message)},
+		LeaseRenewInterval: interval,
+		LeaseRetryInterval: time.Millisecond,
+	})
+	t.Cleanup(s.Stop)
+
+	if err := s.Start(t.Context()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// 3 failures, the successful retry and the next regular renewal.
+	waitFor(t, "lease renewals", func() bool { return st.renewCount() >= 5 })
+
+	st.mu.Lock()
+	times := st.renewTimes[:5]
+	st.mu.Unlock()
+	for i := 1; i < 4; i++ {
+		if gap := times[i].Sub(times[i-1]); gap >= interval/2 {
+			t.Errorf("retry %d came %v after the failure, want well under %v", i, gap, interval)
+		}
+	}
+	if gap := times[4].Sub(times[3]); gap < interval {
+		t.Errorf("renewal after a success came after %v, want at least %v", gap, interval)
 	}
 }

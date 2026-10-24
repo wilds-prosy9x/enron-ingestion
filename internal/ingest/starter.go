@@ -30,6 +30,9 @@ type StarterConfig struct {
 	FlushInterval time.Duration
 	// LeaseRenewInterval is how often a run's lease is renewed. Default store.LeaseTTL / 3.
 	LeaseRenewInterval time.Duration
+	// LeaseRetryInterval is how soon a failed renewal is retried, at most
+	// LeaseRenewInterval. Default 1 second.
+	LeaseRetryInterval time.Duration
 }
 
 // Starter starts ingestion runs in the background.
@@ -122,22 +125,28 @@ func failReason(err error) string {
 
 // keepLease renews run's lease until ctx is done. If the lease has expired or
 // the run has been replaced by another one, it calls stopRun, as the run can't
-// record anything more. Other errors are retried; the lease only expires if
-// they last for store.LeaseTTL.
+// record anything more. Other errors are retried after the shorter retry
+// interval, so that the lease only expires if they last for about store.LeaseTTL.
 func (s *Starter) keepLease(ctx context.Context, run store.Run, stopRun func()) {
 	interval := s.cfg.LeaseRenewInterval
 	if interval <= 0 {
 		interval = store.LeaseTTL / 3
 	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	retry := s.cfg.LeaseRetryInterval
+	if retry <= 0 {
+		retry = time.Second
+	}
+	retry = min(retry, interval)
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-timer.C:
 		}
 		err := run.RenewLease(ctx)
+		next := interval
 		switch {
 		case err == nil, ctx.Err() != nil:
 		case errors.Is(err, store.ErrNotRunning):
@@ -146,7 +155,9 @@ func (s *Starter) keepLease(ctx context.Context, run store.Run, stopRun func()) 
 			return
 		default:
 			slog.Warn("renew ingestion lease", "error", err)
+			next = retry
 		}
+		timer.Reset(next)
 	}
 }
 
