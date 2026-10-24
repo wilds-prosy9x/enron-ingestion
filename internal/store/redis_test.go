@@ -1,65 +1,24 @@
 package store_test
 
 import (
-	"context"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"reflect"
 	"testing"
 
-	"github.com/redis/go-redis/v9"
-	tcredis "github.com/testcontainers/testcontainers-go/modules/redis"
-
+	"github.com/wilds-prosy9x/enron-ingestion/internal/redistest"
 	"github.com/wilds-prosy9x/enron-ingestion/internal/store"
 )
 
-// client is shared by all tests; each test uses its own key prefix.
-// It is nil if the Redis container couldn't be started.
-var (
-	client     *redis.Client
-	startupErr error
-)
-
 func TestMain(m *testing.M) {
-	os.Exit(run(m))
-}
-
-func run(m *testing.M) int {
-	ctx := context.Background()
-	container, err := tcredis.Run(ctx, "redis:7.4")
-	if err != nil {
-		startupErr = err
-		return m.Run()
-	}
-	defer func() {
-		if err := container.Terminate(ctx); err != nil {
-			log.Printf("terminate redis container: %v", err)
-		}
-	}()
-	uri, err := container.ConnectionString(ctx)
-	if err != nil {
-		startupErr = err
-		return m.Run()
-	}
-	opts, err := redis.ParseURL(uri)
-	if err != nil {
-		startupErr = err
-		return m.Run()
-	}
-	client = redis.NewClient(opts)
-	defer client.Close()
-	return m.Run()
+	os.Exit(redistest.Run(m))
 }
 
 // newStore returns a store with keys unique to the test.
 func newStore(t *testing.T) *store.Redis {
 	t.Helper()
-	if client == nil {
-		t.Skipf("Redis container not available (is Docker running?): %v", startupErr)
-	}
-	return store.NewRedis(client, "test:"+t.Name())
+	return store.NewRedis(redistest.Client(t), redistest.Prefix(t))
 }
 
 func mustStatus(t *testing.T, s store.Store) store.Status {
@@ -226,11 +185,9 @@ func TestLifecycle(t *testing.T) {
 }
 
 func TestStoresAreIsolatedByPrefix(t *testing.T) {
-	if client == nil {
-		t.Skipf("Redis container not available (is Docker running?): %v", startupErr)
-	}
-	a := store.NewRedis(client, "test:"+t.Name()+":a")
-	b := store.NewRedis(client, "test:"+t.Name()+":b")
+	client := redistest.Client(t)
+	a := store.NewRedis(client, redistest.Prefix(t))
+	b := store.NewRedis(client, redistest.Prefix(t))
 	if err := a.TryStart(t.Context(), "content"); err != nil {
 		t.Fatalf("TryStart: %v", err)
 	}
