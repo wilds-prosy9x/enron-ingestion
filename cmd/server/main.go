@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"enron_ingestion/internal/server"
+	"github.com/wilds-prosy9x/enron-ingestion/internal/server"
 )
 
 func main() {

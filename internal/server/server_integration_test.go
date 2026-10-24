@@ -7,7 +7,7 @@ import (
 	"reflect"
 	"testing"
 
-	"enron_ingestion/internal/server"
+	"github.com/wilds-prosy9x/enron-ingestion/internal/server"
 )
 
 // TestStatusEndpoint starts a real HTTP server and calls the endpoint over the network.

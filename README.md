@@ -1,4 +1,4 @@
-# enron_ingestion
+# enron-ingestion
 
 A Go service for ingesting the [Enron email dataset](https://www.cs.cmu.edu/~enron/), with a REST API for checking ingestion progress.
 
@@ -36,8 +36,8 @@ The integration tests start a real HTTP server and call the API over the network
 ## Docker
 
 ```bash
-docker build -t enron_ingestion .
-docker run --rm -p 8080:8080 enron_ingestion
+docker build -t enron-ingestion .
+docker run --rm -p 8080:8080 enron-ingestion
 ```
 
 ## API
