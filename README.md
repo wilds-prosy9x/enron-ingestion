@@ -19,6 +19,7 @@ internal/source/     Opens the archive from local or cloud storage
 internal/store/      Ingestion state and sender counts in Redis
 internal/redistest/  Redis container shared by tests
 Dockerfile           Multi-stage build producing a small distroless image
+docker-compose.yml   The app and Redis, for running locally
 ```
 
 ## Configuration
@@ -40,6 +41,20 @@ The dataset stores the same email several times, e.g. in both the sender's `sent
 - `message_id`: same `Message-ID` header, for archives that kept their original IDs.
 
 Cloud credentials are read the usual way for each provider, e.g. `AWS_*` environment variables or `GOOGLE_APPLICATION_CREDENTIALS`.
+
+## Running with Docker Compose
+
+`docker-compose.yml` runs the app with Redis, reading the archive from a local directory:
+
+```bash
+docker compose up --build -d
+curl -X POST localhost:8080/start
+curl localhost:8080/status
+```
+
+By default the archive is read from the repository's parent directory; set `DATASET_DIR` to use another one, e.g. `DATASET_DIR=$HOME/datasets docker compose up --build -d`. `DATASET_KEY` and `DEDUP_MODE` can be set the same way.
+
+Redis keeps its data in a volume, so a finished run survives `docker compose down`. To start over, remove the volume with `docker compose down -v`.
 
 ## Running locally
 
