@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -19,9 +20,14 @@ type file struct {
 // buildArchive returns a gzipped tar archive with a directory entry per file plus the files themselves.
 func buildArchive(t *testing.T, files []file) []byte {
 	t.Helper()
+	return gzipData(t, buildTar(t, files))
+}
+
+// buildTar returns an uncompressed tar archive with a directory entry per file plus the files themselves.
+func buildTar(t *testing.T, files []file) []byte {
+	t.Helper()
 	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	tw := tar.NewWriter(gz)
+	tw := tar.NewWriter(&buf)
 	for _, f := range files {
 		dir := f.path[:strings.LastIndex(f.path, "/")+1]
 		if err := tw.WriteHeader(&tar.Header{Name: dir, Typeflag: tar.TypeDir, Mode: 0o755}); err != nil {
@@ -36,6 +42,17 @@ func buildArchive(t *testing.T, files []file) []byte {
 	}
 	if err := tw.Close(); err != nil {
 		t.Fatalf("close tar: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// gzipData returns data compressed with gzip.
+func gzipData(t *testing.T, data []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	if _, err := gz.Write(data); err != nil {
+		t.Fatalf("write gzip: %v", err)
 	}
 	if err := gz.Close(); err != nil {
 		t.Fatalf("close gzip: %v", err)
@@ -191,6 +208,41 @@ func TestParseStopsOnCallbackError(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Errorf("callback called %d times, want 1", calls)
+	}
+}
+
+func TestParseTruncatedFile(t *testing.T) {
+	content := email("Body text", "Message-ID: <1@x>", "From: a@enron.com", "Subject: Hi")
+	tarData := buildTar(t, []file{{"maildir/a/inbox/1.", content}})
+	start := bytes.Index(tarData, []byte(content))
+	if start < 0 {
+		t.Fatal("file content not found in tar")
+	}
+
+	cuts := []struct {
+		name string
+		at   int
+	}{
+		{"in headers", strings.Index(content, "Subject")},
+		{"in body", strings.Index(content, "text")},
+	}
+	for _, cut := range cuts {
+		archive := gzipData(t, tarData[:start+cut.at])
+		for _, mode := range []ingest.DedupMode{ingest.DedupMessageID, ingest.DedupContent} {
+			t.Run(cut.name+"/"+string(mode), func(t *testing.T) {
+				calls := 0
+				err := ingest.Parse(bytes.NewReader(archive), mode, func(ingest.Message) error {
+					calls++
+					return nil
+				})
+				if !errors.Is(err, io.ErrUnexpectedEOF) {
+					t.Errorf("err = %v, want %v", err, io.ErrUnexpectedEOF)
+				}
+				if calls != 0 {
+					t.Errorf("callback called %d times, want 0", calls)
+				}
+			})
+		}
 	}
 }
 

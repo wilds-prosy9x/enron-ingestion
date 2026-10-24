@@ -64,9 +64,16 @@ func Parse(r io.Reader, mode DedupMode, fn func(Message) error) error {
 		if hdr.Typeflag != tar.TypeReg {
 			continue
 		}
-		msg, err := parseMessage(hdr.Name, tr, mode, h)
+		er := &errReader{r: tr}
+		msg, err := parseMessage(hdr.Name, er, mode, h)
 		if err != nil {
 			return err
+		}
+		// Read the rest of the file so that a truncated archive is reported
+		// before fn sees an incomplete email.
+		_, _ = io.Copy(io.Discard, er)
+		if er.err != nil {
+			return fmt.Errorf("read %s: %w", hdr.Name, er.err)
 		}
 		if err := fn(msg); err != nil {
 			return err
@@ -78,6 +85,8 @@ func parseMessage(path string, r io.Reader, mode DedupMode, h hash.Hash) (Messag
 	msg := Message{Path: path, Key: hashFields(h, "path", path)}
 	m, err := mail.ReadMessage(r)
 	if err != nil {
+		// Malformed headers: keep the message with its path-based key.
+		// Read errors are caught by the caller's errReader.
 		return msg, nil
 	}
 	msg.From = normaliseSender(m.Header.Get("From"))
@@ -100,6 +109,21 @@ func parseMessage(path string, r io.Reader, mode DedupMode, h hash.Hash) (Messag
 		msg.Key = hex.EncodeToString(h.Sum(nil)[:16])
 	}
 	return msg, nil
+}
+
+// errReader records the first read error other than io.EOF, so that it isn't
+// lost when a consumer like mail.ReadMessage treats it as malformed input.
+type errReader struct {
+	r   io.Reader
+	err error
+}
+
+func (e *errReader) Read(p []byte) (int, error) {
+	n, err := e.r.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) && e.err == nil {
+		e.err = err
+	}
+	return n, err
 }
 
 // hashFields returns a 128-bit hex key for the given fields.
