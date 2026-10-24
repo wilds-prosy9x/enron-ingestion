@@ -6,7 +6,6 @@ import (
 	"os"
 	"reflect"
 	"testing"
-	"time"
 
 	"github.com/wilds-prosy9x/enron-ingestion/internal/redistest"
 	"github.com/wilds-prosy9x/enron-ingestion/internal/store"
@@ -245,9 +244,7 @@ func TestExpiredLease(t *testing.T) {
 
 	run := mustStart(t, s, "content")
 	mustRecord(t, run, store.Record{Key: "k1", From: "a@enron.com"})
-	// Let the lease actually expire.
-	client.PExpire(t.Context(), leaseKey(prefix), time.Millisecond)
-	time.Sleep(10 * time.Millisecond)
+	client.Del(t.Context(), leaseKey(prefix)) // as if the lease expired
 
 	want := store.Status{State: store.StateFailed, DedupMode: "content", Processed: 1, Unique: 1, Error: store.ReasonInterrupted}
 	if got := mustStatus(t, s); got != want {
