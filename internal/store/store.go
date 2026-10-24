@@ -8,9 +8,13 @@ import (
 )
 
 // LeaseTTL is how long a run stays in progress without its lease being renewed.
-// After that, the run is considered abandoned, e.g. because its process died,
+// After that, the run is considered abandoned, e.g. because its process died:
+// it is reported as failed with ReasonInterrupted, can't record anything more,
 // and TryStart may replace it.
 const LeaseTTL = 30 * time.Second
+
+// ReasonInterrupted is the Status.Error of a run whose lease has expired.
+const ReasonInterrupted = "ingestion interrupted"
 
 // State is the lifecycle state of an ingestion run.
 type State string
@@ -49,7 +53,8 @@ type Status struct {
 	Unique int64
 	// Skipped is the number of distinct keys without a usable sender.
 	Skipped int64
-	// Error is the reason passed to Fail; empty unless State is StateFailed.
+	// Error is the reason passed to Fail, or ReasonInterrupted if the run's
+	// lease expired; empty unless State is StateFailed.
 	Error string
 }
 
@@ -73,7 +78,7 @@ type Store interface {
 }
 
 // Run is a run started by TryStart. Its methods return ErrNotRunning once the
-// run has ended or another run has replaced it.
+// run has ended, its lease has expired or another run has replaced it.
 type Run interface {
 	// RecordBatch counts the records.
 	RecordBatch(ctx context.Context, records []Record) error
@@ -82,6 +87,6 @@ type Run interface {
 	// Fail marks the run as failed with the given reason.
 	Fail(ctx context.Context, reason string) error
 	// RenewLease extends the run's lease to LeaseTTL from now. It must be called
-	// more often than LeaseTTL, or another run may replace this one.
+	// more often than LeaseTTL, or the run ends as interrupted.
 	RenewLease(ctx context.Context) error
 }

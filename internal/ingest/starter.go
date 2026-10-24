@@ -120,9 +120,10 @@ func failReason(err error) string {
 	}
 }
 
-// keepLease renews run's lease until ctx is done. If the run has been replaced
-// by another one, it calls stopRun, as there is no point in continuing.
-// Other errors are retried; the lease only expires if they last for store.LeaseTTL.
+// keepLease renews run's lease until ctx is done. If the lease has expired or
+// the run has been replaced by another one, it calls stopRun, as the run can't
+// record anything more. Other errors are retried; the lease only expires if
+// they last for store.LeaseTTL.
 func (s *Starter) keepLease(ctx context.Context, run store.Run, stopRun func()) {
 	interval := s.cfg.LeaseRenewInterval
 	if interval <= 0 {
@@ -140,7 +141,7 @@ func (s *Starter) keepLease(ctx context.Context, run store.Run, stopRun func()) 
 		switch {
 		case err == nil, ctx.Err() != nil:
 		case errors.Is(err, store.ErrNotRunning):
-			slog.Error("ingestion run is no longer the current run, stopping it")
+			slog.Error("ingestion run's lease has expired or it was replaced, stopping it")
 			stopRun()
 			return
 		default:

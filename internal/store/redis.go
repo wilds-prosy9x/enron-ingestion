@@ -30,8 +30,7 @@ type keys struct {
 	seen      string // set: dedup keys seen so far
 	senders   string // sorted set: sender -> count of distinct emails
 	err       string // string: reason passed to Fail
-	owner     string // string: token of the current or last run
-	lease     string // string with a TTL: exists while the running run is alive
+	lease     string // string with a TTL: token of the running run, exists while it is alive
 }
 
 // NewRedis returns a Store that keeps its data in client under keys starting with {prefix}.
@@ -48,7 +47,6 @@ func NewRedis(client redis.UniversalClient, prefix string) *Redis {
 			seen:      k("seen"),
 			senders:   k("senders"),
 			err:       k("error"),
-			owner:     k("owner"),
 			lease:     k("lease"),
 		},
 	}
@@ -58,13 +56,12 @@ func NewRedis(client redis.UniversalClient, prefix string) *Redis {
 // or running with a live lease. It returns 1 on success, 0 if refused.
 var startScript = redis.NewScript(`
 local state = redis.call('GET', KEYS[1])
-if state == 'finished' or (state == 'running' and redis.call('EXISTS', KEYS[10]) == 1) then
+if state == 'finished' or (state == 'running' and redis.call('EXISTS', KEYS[9]) == 1) then
 	return 0
 end
 redis.call('UNLINK', KEYS[3], KEYS[4], KEYS[5], KEYS[6], KEYS[7], KEYS[8])
 redis.call('SET', KEYS[2], ARGV[1])
-redis.call('SET', KEYS[9], ARGV[2])
-redis.call('SET', KEYS[10], ARGV[2], 'PX', ARGV[3])
+redis.call('SET', KEYS[9], ARGV[2], 'PX', ARGV[3])
 redis.call('SET', KEYS[1], 'running')
 return 1
 `)
@@ -73,7 +70,7 @@ func (r *Redis) TryStart(ctx context.Context, dedupMode string) (Run, error) {
 	k := r.keys
 	token := rand.Text()
 	ok, err := startScript.Run(ctx, r.client,
-		[]string{k.state, k.mode, k.processed, k.unique, k.skipped, k.seen, k.senders, k.err, k.owner, k.lease},
+		[]string{k.state, k.mode, k.processed, k.unique, k.skipped, k.seen, k.senders, k.err, k.lease},
 		dedupMode, token, LeaseTTL.Milliseconds()).Int()
 	if err != nil {
 		return nil, fmt.Errorf("start: %w", err)
@@ -84,8 +81,9 @@ func (r *Redis) TryStart(ctx context.Context, dedupMode string) (Run, error) {
 	return &redisRun{r: r, token: token}, nil
 }
 
-// redisRun is a Run whose token identifies it in the owner key. Its scripts
-// only act while the run is in progress and still owned by the token.
+// redisRun is a Run whose token is the value of its lease. Its scripts only act
+// while the run is in progress and the lease still holds the token, so once the
+// lease has expired, or another run has replaced it, the run can't change anything.
 type redisRun struct {
 	r     *Redis
 	token string
@@ -99,13 +97,13 @@ var renewScript = redis.NewScript(`
 if redis.call('GET', KEYS[1]) ~= 'running' or redis.call('GET', KEYS[2]) ~= ARGV[1] then
 	return 0
 end
-redis.call('SET', KEYS[3], ARGV[1], 'PX', ARGV[2])
+redis.call('PEXPIRE', KEYS[2], ARGV[2])
 return 1
 `)
 
 func (run *redisRun) RenewLease(ctx context.Context) error {
 	k := run.r.keys
-	ok, err := renewScript.Run(ctx, run.r.client, []string{k.state, k.owner, k.lease},
+	ok, err := renewScript.Run(ctx, run.r.client, []string{k.state, k.lease},
 		run.token, LeaseTTL.Milliseconds()).Int()
 	if err != nil {
 		return fmt.Errorf("renew lease: %w", err)
@@ -151,7 +149,7 @@ func (run *redisRun) RecordBatch(ctx context.Context, records []Record) error {
 	}
 	k := run.r.keys
 	ok, err := recordScript.Run(ctx, run.r.client,
-		[]string{k.state, k.processed, k.unique, k.skipped, k.seen, k.senders, k.owner},
+		[]string{k.state, k.processed, k.unique, k.skipped, k.seen, k.senders, k.lease},
 		args...).Int()
 	if err != nil {
 		return fmt.Errorf("record batch: %w", err)
@@ -171,7 +169,7 @@ if redis.call('GET', KEYS[1]) ~= 'running' or redis.call('GET', KEYS[3]) ~= ARGV
 end
 redis.call('SET', KEYS[1], ARGV[1])
 redis.call('SET', KEYS[2], ARGV[2])
-redis.call('DEL', KEYS[4])
+redis.call('DEL', KEYS[3])
 return 1
 `)
 
@@ -185,7 +183,7 @@ func (run *redisRun) Fail(ctx context.Context, reason string) error {
 
 func (run *redisRun) end(ctx context.Context, state State, reason string) error {
 	k := run.r.keys
-	ok, err := endScript.Run(ctx, run.r.client, []string{k.state, k.err, k.owner, k.lease},
+	ok, err := endScript.Run(ctx, run.r.client, []string{k.state, k.err, k.lease},
 		string(state), reason, run.token).Int()
 	if err != nil {
 		return fmt.Errorf("set state %s: %w", state, err)
@@ -199,7 +197,7 @@ func (run *redisRun) end(ctx context.Context, state State, reason string) error 
 func (r *Redis) Status(ctx context.Context) (Status, error) {
 	k := r.keys
 	// MGET reads all values at once, so the counts are consistent with each other.
-	vals, err := r.client.MGet(ctx, k.state, k.mode, k.processed, k.unique, k.skipped, k.err).Result()
+	vals, err := r.client.MGet(ctx, k.state, k.mode, k.processed, k.unique, k.skipped, k.err, k.lease).Result()
 	if err != nil {
 		return Status{}, fmt.Errorf("status: %w", err)
 	}
@@ -228,8 +226,13 @@ func (r *Redis) Status(ctx context.Context) (Status, error) {
 		Skipped:   num("skipped", vals[4]),
 		Error:     str(vals[5]),
 	}
-	if st.State == "" {
+	switch {
+	case st.State == "":
 		st.State = StateNotStarted
+	case st.State == StateRunning && vals[6] == nil:
+		// The run's lease has expired, so it can't record anything more.
+		st.State = StateFailed
+		st.Error = ReasonInterrupted
 	}
 	if err := errors.Join(errs...); err != nil {
 		return Status{}, fmt.Errorf("status: %w", err)

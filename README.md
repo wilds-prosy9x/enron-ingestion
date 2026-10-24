@@ -92,7 +92,7 @@ On `SIGTERM` the server stops accepting requests, cancels a run in progress, rec
 
 There is one ingestion run per Redis database: once it has finished, `POST /start` is refused. A `failed` run can be started again; its data is discarded and the ingestion starts over.
 
-Only one instance should run, but running a second one by mistake is safe. A running run holds a lease in Redis that its instance renews every 10 seconds. While the lease is held, other instances can't start a run. If the instance dies without marking the run failed, e.g. because it was killed, the lease expires after 30 seconds, and the next `POST /start` replaces the abandoned run. An instance whose run has been replaced stops it and can no longer change the stored data.
+Only one instance should run, but running a second one by mistake is safe. A running run holds a lease in Redis that its instance renews every 10 seconds. While the lease is held, other instances can't start a run. If the instance dies without marking the run failed, e.g. because it was killed, the lease expires after 30 seconds. The run is then reported as `failed` with the error `ingestion interrupted`, and `POST /start` starts it again. The same happens if the instance can't reach Redis for 30 seconds: once the lease has expired, the instance can no longer change the stored data and stops its run.
 
 The app's Redis keys start with `{enron}:`.
 
@@ -151,6 +151,7 @@ When a run fails, `error` is one of the following; the full error is only logged
 | `dataset archive not found`         | There is no `DATASET_KEY` in `DATASET_BUCKET`                              |
 | `dataset archive could not be read` | The archive is corrupt or truncated, or reading it failed                  |
 | `ingestion cancelled`               | The server shut down during the run                                        |
+| `ingestion interrupted`             | The server stopped renewing the run's lease, e.g. because it was killed    |
 | `internal error`                    | Anything else, e.g. Redis or storage access failing                        |
 
 The counts are updated in batches, at least every half second while the run is in progress.

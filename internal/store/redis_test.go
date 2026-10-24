@@ -6,6 +6,7 @@ import (
 	"os"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/wilds-prosy9x/enron-ingestion/internal/redistest"
 	"github.com/wilds-prosy9x/enron-ingestion/internal/store"
@@ -213,10 +214,12 @@ func TestLease(t *testing.T) {
 	run := mustStart(t, s, "content")
 	checkTTL("after start")
 
-	// A run whose lease lapsed but wasn't replaced can carry on.
-	client.Del(ctx, leaseKey(prefix))
+	client.PExpire(ctx, leaseKey(prefix), store.LeaseTTL/2)
 	if err := run.RenewLease(ctx); err != nil {
 		t.Fatalf("RenewLease: %v", err)
+	}
+	if ttl := client.PTTL(ctx, leaseKey(prefix)).Val(); ttl <= store.LeaseTTL/2 {
+		t.Errorf("lease TTL after renewal = %v, want more than %v", ttl, store.LeaseTTL/2)
 	}
 	checkTTL("after renewal")
 	if _, err := s.TryStart(ctx, "content"); !errors.Is(err, store.ErrAlreadyStarted) {
@@ -229,6 +232,30 @@ func TestLease(t *testing.T) {
 	}
 	if client.Exists(ctx, leaseKey(prefix)).Val() != 0 {
 		t.Errorf("lease exists after Fail")
+	}
+}
+
+// TestExpiredLease checks that a run whose lease has expired, e.g. because its
+// instance lost its connection to Redis, is reported as failed, and stays so
+// even if the instance comes back.
+func TestExpiredLease(t *testing.T) {
+	client := redistest.Client(t)
+	prefix := redistest.Prefix(t)
+	s := store.NewRedis(client, prefix)
+
+	run := mustStart(t, s, "content")
+	mustRecord(t, run, store.Record{Key: "k1", From: "a@enron.com"})
+	// Let the lease actually expire.
+	client.PExpire(t.Context(), leaseKey(prefix), time.Millisecond)
+	time.Sleep(10 * time.Millisecond)
+
+	want := store.Status{State: store.StateFailed, DedupMode: "content", Processed: 1, Unique: 1, Error: store.ReasonInterrupted}
+	if got := mustStatus(t, s); got != want {
+		t.Errorf("Status = %+v, want %+v", got, want)
+	}
+	checkEnded(t, run)
+	if got := mustStatus(t, s); got != want {
+		t.Errorf("Status after late calls = %+v, want %+v", got, want)
 	}
 }
 
@@ -250,6 +277,9 @@ func TestAbandonedRunIsReplaced(t *testing.T) {
 	}
 
 	client.Del(ctx, leaseKey(prefix)) // as if the lease expired
+	if got := mustStatus(t, b); got.State != store.StateFailed || got.Error != store.ReasonInterrupted {
+		t.Errorf("Status of the abandoned run = %+v, want failed with %q", got, store.ReasonInterrupted)
+	}
 	replacement := mustStart(t, b, "content")
 	checkEnded(t, old)
 	mustRecord(t, replacement, store.Record{Key: "k2", From: "b@enron.com"})
