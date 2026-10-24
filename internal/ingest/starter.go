@@ -110,6 +110,8 @@ func (s *Starter) Start(ctx context.Context) error {
 // failReason returns the reason recorded for a run that failed with err. API
 // clients see it, so it only names the kind of failure, leaving out details
 // such as storage addresses and bucket URLs; the full error is logged.
+// The store reports one more reason, store.ReasonInterrupted, which these
+// must not clash with.
 func failReason(err error) string {
 	switch {
 	case errors.Is(err, context.Canceled):
