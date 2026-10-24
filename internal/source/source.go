@@ -20,6 +20,10 @@ var ErrNotFound = errors.New("object not found")
 
 // Open opens the object key in the bucket at bucketURL for streaming reads.
 // The caller must close the returned reader.
+//
+// ctx governs every read on the returned reader, not just the open: once ctx
+// is cancelled, further reads fail. Pass a context that outlives the reads,
+// such as the request context of the handler streaming the object.
 func Open(ctx context.Context, bucketURL, key string) (io.ReadCloser, error) {
 	bucket, err := blob.OpenBucket(ctx, bucketURL)
 	if err != nil {
@@ -29,7 +33,7 @@ func Open(ctx context.Context, bucketURL, key string) (io.ReadCloser, error) {
 	if err != nil {
 		bucket.Close()
 		if gcerrors.Code(err) == gcerrors.NotFound {
-			return nil, fmt.Errorf("open %s in %s: %w", key, bucketURL, ErrNotFound)
+			return nil, fmt.Errorf("open %s in %s: %w: %w", key, bucketURL, ErrNotFound, err)
 		}
 		return nil, fmt.Errorf("open %s in %s: %w", key, bucketURL, err)
 	}

@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"gocloud.dev/gcerrors"
+
 	"github.com/wilds-prosy9x/enron-ingestion/internal/source"
 )
 
@@ -55,6 +57,10 @@ func TestOpenErrors(t *testing.T) {
 			}
 			if got := errors.Is(err, source.ErrNotFound); got != tt.notFound {
 				t.Errorf("errors.Is(err, ErrNotFound) = %v, want %v (err: %v)", got, tt.notFound, err)
+			}
+			// The driver's error must stay in the chain alongside ErrNotFound.
+			if tt.notFound && gcerrors.Code(err) != gcerrors.NotFound {
+				t.Errorf("gcerrors.Code(err) = %v, want NotFound (err: %v)", gcerrors.Code(err), err)
 			}
 		})
 	}
