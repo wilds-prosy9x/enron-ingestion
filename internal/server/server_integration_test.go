@@ -162,9 +162,11 @@ func TestPausedRun(t *testing.T) {
 		t.Fatalf("POST /start: status = %d, want %d (body %v)", code, http.StatusAccepted, body)
 	}
 
-	src.ch <- ingest.Message{Key: "k1", From: "a@enron.com"}
-	src.ch <- ingest.Message{Key: "k2", From: "b@enron.com"}
-	src.ch <- ingest.Message{Key: "k3", From: "a@enron.com"}
+	src.send(t,
+		ingest.Message{Key: "k1", From: "a@enron.com"},
+		ingest.Message{Key: "k2", From: "b@enron.com"},
+		ingest.Message{Key: "k3", From: "a@enron.com"},
+	)
 	// The source is paused now, so the counts can't move past 3.
 	body := waitForStatus(t, url, processed(3))
 	checkBody(t, "status after 3", body, map[string]any{
@@ -176,8 +178,10 @@ func TestPausedRun(t *testing.T) {
 	_, body = call(t, http.MethodGet, url+"/top-senders")
 	checkBody(t, "top senders after 3", body, senders("a@enron.com", 2, "b@enron.com", 1))
 
-	src.ch <- ingest.Message{Key: "k4", From: "c@enron.com"}
-	src.ch <- ingest.Message{Key: "k2", From: "b@enron.com"} // duplicate
+	src.send(t,
+		ingest.Message{Key: "k4", From: "c@enron.com"},
+		ingest.Message{Key: "k2", From: "b@enron.com"}, // duplicate
+	)
 	body = waitForStatus(t, url, processed(5))
 	checkBody(t, "status after 5", body, map[string]any{
 		"state":                   "running",
@@ -243,6 +247,19 @@ func (s *chanSource) Messages(ctx context.Context, fn func(ingest.Message) error
 			}
 		case <-ctx.Done():
 			return ctx.Err()
+		}
+	}
+}
+
+// send hands msgs to the source one by one. It fails the test if the source
+// stops taking them, e.g. because the run ended early, instead of blocking forever.
+func (s *chanSource) send(t *testing.T, msgs ...ingest.Message) {
+	t.Helper()
+	for _, m := range msgs {
+		select {
+		case s.ch <- m:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("source didn't take message %s; has the run ended?", m.Key)
 		}
 	}
 }

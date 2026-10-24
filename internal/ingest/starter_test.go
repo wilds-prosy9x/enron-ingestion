@@ -72,8 +72,8 @@ func TestStarterRunsInBackground(t *testing.T) {
 		t.Errorf("TryStart modes = %v, want %v", st.modes, want)
 	}
 
-	src.ch <- msg(0)
-	src.ch <- msg(1)
+	src.send(t, msg(0))
+	src.send(t, msg(1))
 	close(src.ch)
 	waitFor(t, "run to finish", func() bool {
 		_, _, finished, _ := st.snapshot()
@@ -93,8 +93,8 @@ func TestStarterStopCancelsRun(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	// Once the source has taken msg(1), it has handed msg(0) to the runner.
-	src.ch <- msg(0)
-	src.ch <- msg(1)
+	src.send(t, msg(0))
+	src.send(t, msg(1))
 
 	stopped := make(chan struct{})
 	go func() {

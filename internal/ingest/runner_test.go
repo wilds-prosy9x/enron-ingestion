@@ -115,6 +115,19 @@ func (s *chanSource) Messages(ctx context.Context, fn func(ingest.Message) error
 	}
 }
 
+// send hands msgs to the source one by one. It fails the test if the source
+// stops taking them, e.g. because the run ended early, instead of blocking forever.
+func (s *chanSource) send(t *testing.T, msgs ...ingest.Message) {
+	t.Helper()
+	for _, m := range msgs {
+		select {
+		case s.ch <- m:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("source didn't take message %s; has the run ended?", m.Key)
+		}
+	}
+}
+
 // messages returns a closed channel holding msgs k0..k(n-1).
 func messages(n int) chan ingest.Message {
 	ch := make(chan ingest.Message, n)
@@ -214,8 +227,8 @@ func TestRunnerFlushesPartialBatchAfterInterval(t *testing.T) {
 	r := &ingest.Runner{Source: src, Recorder: rec, BatchSize: 3, FlushInterval: 20 * time.Millisecond}
 	wait := runAsync(t, t.Context(), r)
 
-	src.ch <- msg(0)
-	src.ch <- msg(1)
+	src.send(t, msg(0))
+	src.send(t, msg(1))
 	waitFor(t, "partial batch to be recorded", func() bool {
 		_, got, _, _ := rec.snapshot()
 		return len(got) == 2
@@ -226,7 +239,7 @@ func TestRunnerFlushesPartialBatchAfterInterval(t *testing.T) {
 
 	// Mix full batches with flushes by the timer and at the end.
 	for i := 2; i < 7; i++ {
-		src.ch <- msg(i)
+		src.send(t, msg(i))
 	}
 	close(src.ch)
 	if err := wait(); err != nil {
@@ -365,9 +378,9 @@ func TestRunnerCancelled(t *testing.T) {
 
 	// Once the source has taken msg(2), it has handed msg(0) and msg(1) to the runner.
 	// Whether msg(2) gets through before the cancellation is down to timing.
-	src.ch <- msg(0)
-	src.ch <- msg(1)
-	src.ch <- msg(2)
+	src.send(t, msg(0))
+	src.send(t, msg(1))
+	src.send(t, msg(2))
 	cancel()
 
 	err := wait()
@@ -413,12 +426,12 @@ func cancelWhileRecording(t *testing.T, laterErr error) (*fakeRecorder, error) {
 	defer cancel()
 	wait := runAsync(t, ctx, r)
 
-	src.ch <- msg(0)
-	src.ch <- msg(1)
+	src.send(t, msg(0))
+	src.send(t, msg(1))
 	<-entered
-	src.ch <- msg(2)
-	src.ch <- msg(3)
-	src.ch <- msg(4) // the runner's channel is full, so the source keeps this one
+	src.send(t, msg(2))
+	src.send(t, msg(3))
+	src.send(t, msg(4)) // the runner's channel is full, so the source keeps this one
 	cancel()
 	close(release)
 	return rec, wait()
