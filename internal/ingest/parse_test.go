@@ -169,6 +169,17 @@ func TestParseKeys(t *testing.T) {
 					groupOf[path] = i
 				}
 			}
+			for path := range groupOf {
+				if _, ok := got[path]; !ok {
+					t.Errorf("%s: not parsed", path)
+				}
+			}
+			for path := range got {
+				// An ungrouped path would compare as group 0, so the key checks below would be wrong.
+				if _, ok := groupOf[path]; !ok {
+					t.Fatalf("%s: parsed but not in any group", path)
+				}
+			}
 			for p1, m1 := range got {
 				if len(m1.Key) != 32 {
 					t.Errorf("%s: key %q has length %d, want 32", p1, m1.Key, len(m1.Key))
@@ -252,21 +263,26 @@ func TestParseErrors(t *testing.T) {
 		name string
 		data []byte
 		mode ingest.DedupMode
-		// want is the error Parse must wrap, or nil if any error will do.
+		// want is the error Parse must wrap.
 		want error
 	}{
-		{"not gzip", []byte("plain text"), ingest.DedupContent, nil},
-		{"truncated", valid[:40], ingest.DedupContent, nil},
+		{"not gzip", []byte("plain text"), ingest.DedupContent, gzip.ErrHeader},
+		// Cut inside the first tar header, before any file.
+		{"truncated tar header", valid[:40], ingest.DedupContent, io.ErrUnexpectedEOF},
 		{"unknown mode", valid, ingest.DedupMode("subject"), ingest.ErrUnknownMode},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ingest.Parse(bytes.NewReader(tt.data), tt.mode, func(ingest.Message) error { return nil })
-			if err == nil {
-				t.Fatal("Parse returned nil error, want an error")
-			}
-			if tt.want != nil && !errors.Is(err, tt.want) {
+			calls := 0
+			err := ingest.Parse(bytes.NewReader(tt.data), tt.mode, func(ingest.Message) error {
+				calls++
+				return nil
+			})
+			if !errors.Is(err, tt.want) {
 				t.Errorf("err = %v, want %v", err, tt.want)
+			}
+			if calls != 0 {
+				t.Errorf("callback called %d times, want 0", calls)
 			}
 		})
 	}
