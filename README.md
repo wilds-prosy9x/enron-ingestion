@@ -33,7 +33,7 @@ The server is configured with environment variables:
 
 The dataset stores the same email several times, e.g. in both the sender's `sent` and `all_documents` folders. Each copy counts towards `processed_message_count`, but only once towards `unique_message_count` and the sender counts. `DEDUP_MODE` selects how copies are recognised:
 
-- `content`: same sender, date, subject, recipients and body. Use this for the Enron dataset, where every stored copy was given a new `Message-ID`.
+- `content`: same sender, date, subject, recipients and body. Use this for the Enron dataset, where every stored copy was given a new `Message-ID`. The order and case of the `To` and `Cc` addresses don't matter, nor do line endings, whitespace at the end of lines or trailing blank lines in the body.
 - `message_id`: same `Message-ID` header, for archives that kept their original IDs.
 
 Cloud credentials are read the usual way for each provider, e.g. `AWS_*` environment variables or `GOOGLE_APPLICATION_CREDENTIALS`.

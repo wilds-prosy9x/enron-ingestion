@@ -11,6 +11,7 @@ import (
 	"hash"
 	"io"
 	"net/mail"
+	"slices"
 	"strings"
 )
 
@@ -24,6 +25,8 @@ const (
 	// DedupContent treats emails with the same sender, date, subject, recipients
 	// and body as copies. Use it when Message-IDs aren't reliable, as in the
 	// Enron dataset, where every stored copy was given a new Message-ID.
+	// The order and case of recipients, line endings, whitespace at the end of
+	// lines and trailing blank lines don't matter.
 	DedupContent DedupMode = "content"
 )
 
@@ -106,12 +109,13 @@ func parseMessage(path string, r io.Reader, mode DedupMode, h hash.Hash) (Messag
 		}
 	case DedupContent:
 		h.Reset()
-		writeFields(h, "content", msg.From)
-		for _, name := range []string{"Date", "Subject", "To", "Cc"} {
-			writeFields(h, strings.TrimSpace(m.Header.Get(name)))
-		}
+		writeFields(h, "content", msg.From,
+			strings.TrimSpace(m.Header.Get("Date")),
+			strings.TrimSpace(m.Header.Get("Subject")),
+			normaliseAddresses(m.Header.Get("To")),
+			normaliseAddresses(m.Header.Get("Cc")))
 		// An error here means the archive itself is broken, so stop.
-		if _, err := io.Copy(h, m.Body); err != nil {
+		if _, err := io.Copy(&bodyNormaliser{w: h}, m.Body); err != nil {
 			return Message{}, fmt.Errorf("%w: read %s: %w", ErrReadArchive, path, err)
 		}
 		msg.Key = sumKey(h)
@@ -165,4 +169,69 @@ func normaliseSender(from string) string {
 		return strings.ToLower(addr.Address)
 	}
 	return strings.ToLower(strings.TrimSpace(from))
+}
+
+// normaliseAddresses returns the addresses in an address list header value,
+// lowercased like normaliseSender, sorted and without duplicates, so that
+// copies of an email listing the same recipients differently get the same key.
+// If the list isn't valid, it is split at commas instead.
+func normaliseAddresses(list string) string {
+	var addrs []string
+	if parsed, err := mail.ParseAddressList(list); err == nil {
+		for _, a := range parsed {
+			addrs = append(addrs, strings.ToLower(a.Address))
+		}
+	} else {
+		for _, a := range strings.Split(list, ",") {
+			if a = strings.ToLower(strings.TrimSpace(a)); a != "" {
+				addrs = append(addrs, a)
+			}
+		}
+	}
+	slices.Sort(addrs)
+	return strings.Join(slices.Compact(addrs), ",")
+}
+
+// bodyNormaliser writes an email body to w with line endings unified to \n,
+// spaces and tabs at the end of lines removed and trailing blank lines dropped,
+// so that copies of an email differing only in that whitespace get the same key.
+// Whitespace is held back until a later character shows it isn't trailing.
+type bodyNormaliser struct {
+	w        io.Writer
+	spaces   []byte // spaces and tabs since the last line break or other character
+	newlines int    // line breaks held back
+	afterCR  bool   // the last byte was \r, so a \n right after it is part of the same line break
+	out      []byte // reused output buffer
+}
+
+func (n *bodyNormaliser) Write(p []byte) (int, error) {
+	n.out = n.out[:0]
+	for _, c := range p {
+		afterCR := n.afterCR
+		n.afterCR = c == '\r'
+		switch c {
+		case ' ', '\t':
+			n.spaces = append(n.spaces, c)
+		case '\n':
+			if afterCR {
+				continue
+			}
+			fallthrough
+		case '\r':
+			n.spaces = n.spaces[:0]
+			n.newlines++
+		default:
+			for range n.newlines {
+				n.out = append(n.out, '\n')
+			}
+			n.newlines = 0
+			n.out = append(n.out, n.spaces...)
+			n.spaces = n.spaces[:0]
+			n.out = append(n.out, c)
+		}
+	}
+	if _, err := n.w.Write(n.out); err != nil {
+		return 0, err
+	}
+	return len(p), nil
 }

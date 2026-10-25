@@ -120,6 +120,10 @@ func TestParseKeys(t *testing.T) {
 	withID := func(id string, extra ...string) []string {
 		return append(append([]string{"Message-ID: " + id}, headers...), extra...)
 	}
+	// withTo is like withID, but with the recipient headers replaced by recipients.
+	withTo := func(id string, recipients ...string) []string {
+		return append(append([]string{"Message-ID: " + id}, headers[:3]...), recipients...)
+	}
 
 	archive := buildArchive(t, []file{
 		{"maildir/a/sent/1.", email("Body", withID("<1@x>", "X-Folder: sent")...)},
@@ -135,6 +139,20 @@ func TestParseKeys(t *testing.T) {
 		// Unreadable headers.
 		{"maildir/f/inbox/1.", "not an email"},
 		{"maildir/f/inbox/2.", "not an email"},
+		// Same recipients in another order, case and form, and the same body
+		// with other line endings, trailing whitespace and trailing blank lines.
+		{"maildir/g/inbox/1.", email("Line 1\r\nLine 2\r\n",
+			withTo("<4@x>", "To: bob@enron.com, Lynn.Blair@enron.com", "Cc: c@enron.com")...)},
+		{"maildir/g/inbox/2.", email("Line 1 \t\nLine 2\n\n\n",
+			withTo("<5@x>", `To: "Blair, Lynn" <lynn.blair@enron.com>, BOB@enron.com, bob@enron.com`, "Cc: C@Enron.com")...)},
+		// Fewer recipients, or an extra blank line within the body.
+		{"maildir/g/inbox/3.", email("Line 1\r\nLine 2\r\n",
+			withTo("<6@x>", "To: bob@enron.com", "Cc: c@enron.com")...)},
+		{"maildir/g/inbox/4.", email("Line 1\r\n\r\nLine 2\r\n",
+			withTo("<7@x>", "To: bob@enron.com, Lynn.Blair@enron.com", "Cc: c@enron.com")...)},
+		// Invalid address lists are compared by their comma-separated parts.
+		{"maildir/h/inbox/1.", email("Body", withTo("<8@x>", "To: bob, Ann")...)},
+		{"maildir/h/inbox/2.", email("Body", withTo("<9@x>", "To: ann , BOB")...)},
 	})
 
 	tests := []struct {
@@ -150,6 +168,12 @@ func TestParseKeys(t *testing.T) {
 			{"maildir/e/inbox/2."},
 			{"maildir/f/inbox/1."},
 			{"maildir/f/inbox/2."},
+			{"maildir/g/inbox/1."},
+			{"maildir/g/inbox/2."},
+			{"maildir/g/inbox/3."},
+			{"maildir/g/inbox/4."},
+			{"maildir/h/inbox/1."},
+			{"maildir/h/inbox/2."},
 		}},
 		{ingest.DedupContent, [][]string{
 			{"maildir/a/sent/1.", "maildir/b/inbox/1.", "maildir/e/inbox/1.", "maildir/e/inbox/2."},
@@ -157,6 +181,10 @@ func TestParseKeys(t *testing.T) {
 			{"maildir/d/inbox/1."},
 			{"maildir/f/inbox/1."},
 			{"maildir/f/inbox/2."},
+			{"maildir/g/inbox/1.", "maildir/g/inbox/2."},
+			{"maildir/g/inbox/3."},
+			{"maildir/g/inbox/4."},
+			{"maildir/h/inbox/1.", "maildir/h/inbox/2."},
 		}},
 	}
 	for _, tt := range tests {
