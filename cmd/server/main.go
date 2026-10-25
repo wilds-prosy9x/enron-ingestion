@@ -11,18 +11,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/redis/go-redis/v9"
-
 	"github.com/wilds-prosy9x/enron-ingestion/internal/ingest"
 	"github.com/wilds-prosy9x/enron-ingestion/internal/server"
 	"github.com/wilds-prosy9x/enron-ingestion/internal/store"
 )
 
-const (
-	shutdownTimeout = 10 * time.Second
-	// redisKeyPrefix namespaces the app's keys in Redis.
-	redisKeyPrefix = "enron"
-)
+const shutdownTimeout = 10 * time.Second
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -37,8 +31,6 @@ func main() {
 // config holds the settings read from environment variables.
 type config struct {
 	addr          string // ADDR
-	redisAddr     string // REDIS_ADDR
-	redisPassword string // REDIS_PASSWORD
 	datasetBucket string // DATASET_BUCKET, required
 	datasetKey    string // DATASET_KEY
 	dedupMode     ingest.DedupMode
@@ -54,8 +46,6 @@ func loadConfig(getenv func(string) string) (config, error) {
 	}
 	cfg := config{
 		addr:          get("ADDR", ":8080"),
-		redisAddr:     get("REDIS_ADDR", "localhost:6379"),
-		redisPassword: getenv("REDIS_PASSWORD"),
 		datasetBucket: getenv("DATASET_BUCKET"),
 		datasetKey:    get("DATASET_KEY", "enron_mail_20150507.tar.gz"),
 		dedupMode:     ingest.DedupMode(get("DEDUP_MODE", string(ingest.DedupContent))),
@@ -78,17 +68,7 @@ func run(ctx context.Context, stopSignals func()) error {
 		return err
 	}
 
-	rdb := redis.NewClient(&redis.Options{Addr: cfg.redisAddr, Password: cfg.redisPassword})
-	defer rdb.Close()
-	// Redis may become available later, so a failed check isn't fatal;
-	// requests fail with 500 until it is reachable.
-	pingCtx, cancelPing := context.WithTimeout(ctx, 2*time.Second)
-	if err := rdb.Ping(pingCtx).Err(); err != nil {
-		slog.Warn("redis not reachable", "addr", cfg.redisAddr, "error", err)
-	}
-	cancelPing()
-
-	st := store.NewRedis(rdb, redisKeyPrefix)
+	st := store.NewMemory()
 	starter := ingest.NewStarter(st, ingest.StarterConfig{
 		Source: ingest.ArchiveSource{BucketURL: cfg.datasetBucket, Key: cfg.datasetKey, Mode: cfg.dedupMode},
 	})

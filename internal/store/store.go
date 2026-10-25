@@ -65,7 +65,7 @@ type SenderCount struct {
 }
 
 // Store keeps the ingestion state and counts. Implementations must be safe for
-// concurrent use, including from several app instances sharing the same data.
+// concurrent use.
 type Store interface {
 	// TryStart begins a new run, discarding the data of any previous failed or
 	// abandoned run, and returns it. It returns ErrAlreadyStarted if a run is in

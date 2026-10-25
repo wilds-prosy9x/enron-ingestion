@@ -311,7 +311,7 @@ func TestRunnerFailReason(t *testing.T) {
 
 func TestRunnerFailError(t *testing.T) {
 	readErr := errors.New("archive truncated")
-	failErr := errors.New("redis down")
+	failErr := errors.New("store down")
 	rec := &fakeRecorder{failErr: failErr}
 	r := &ingest.Runner{Source: &chanSource{ch: messages(1), err: readErr}, Recorder: rec}
 
@@ -324,7 +324,7 @@ func TestRunnerFailError(t *testing.T) {
 }
 
 func TestRunnerRecordError(t *testing.T) {
-	recordErr := errors.New("redis down")
+	recordErr := errors.New("store down")
 	rec := &fakeRecorder{recordErr: func(batch int) error {
 		if batch == 1 {
 			return recordErr
@@ -352,7 +352,7 @@ func TestRunnerRecordError(t *testing.T) {
 	if want := keys(0, 2); !reflect.DeepEqual(got, want) {
 		t.Errorf("keys = %v, want %v", got, want)
 	}
-	if finished || !strings.Contains(failed, "redis down") {
+	if finished || !strings.Contains(failed, "store down") {
 		t.Errorf("finished = %v, failed = %q; want failed with the record error", finished, failed)
 	}
 	checkEndCtx(t, rec)
@@ -471,7 +471,7 @@ func TestRunnerCancelledWhileRecording(t *testing.T) {
 	})
 
 	t.Run("record error", func(t *testing.T) {
-		recordErr := errors.New("redis down")
+		recordErr := errors.New("store down")
 		rec, err := cancelWhileRecording(t, recordErr)
 		if !errors.Is(err, recordErr) {
 			t.Fatalf("Run: err = %v, want %v", err, recordErr)
@@ -480,7 +480,7 @@ func TestRunnerCancelledWhileRecording(t *testing.T) {
 		if want := keys(0, 2); !reflect.DeepEqual(got, want) {
 			t.Errorf("keys = %v, want %v", got, want)
 		}
-		if finished || !strings.Contains(failed, "redis down") {
+		if finished || !strings.Contains(failed, "store down") {
 			t.Errorf("finished = %v, failed = %q; want failed with the record error", finished, failed)
 		}
 		checkEndCtx(t, rec)
@@ -488,7 +488,7 @@ func TestRunnerCancelledWhileRecording(t *testing.T) {
 }
 
 func TestRunnerFinishError(t *testing.T) {
-	for _, finishErr := range []error{errors.New("redis down"), store.ErrNotRunning} {
+	for _, finishErr := range []error{errors.New("store down"), store.ErrNotRunning} {
 		t.Run(finishErr.Error(), func(t *testing.T) {
 			rec := &fakeRecorder{finishErr: finishErr}
 			r := &ingest.Runner{Source: &chanSource{ch: messages(1)}, Recorder: rec}

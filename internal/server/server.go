@@ -15,7 +15,7 @@ import (
 // topSendersLimit is the number of senders returned by GET /top-senders.
 const topSendersLimit = 10
 
-// Store is the read side of the ingestion store. *store.Redis implements it.
+// Store is the read side of the ingestion store. *store.Memory implements it.
 type Store interface {
 	Status(ctx context.Context) (store.Status, error)
 	TopSenders(ctx context.Context, n int) ([]store.SenderCount, error)

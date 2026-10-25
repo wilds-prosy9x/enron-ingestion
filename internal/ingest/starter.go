@@ -17,7 +17,7 @@ const startTimeout = 5 * time.Second
 // ErrStopped is returned by Starter.Start after Stop has been called.
 var ErrStopped = errors.New("starter stopped")
 
-// RunStore is the store a Starter needs. *store.Redis implements it.
+// RunStore is the store a Starter needs. *store.Memory implements it.
 type RunStore interface {
 	TryStart(ctx context.Context, dedupMode string) (store.Run, error)
 }

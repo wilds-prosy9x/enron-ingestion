@@ -18,7 +18,6 @@ func TestLoadConfigDefaults(t *testing.T) {
 	}
 	want := config{
 		addr:          ":8080",
-		redisAddr:     "localhost:6379",
 		datasetBucket: "file:///data",
 		datasetKey:    "enron_mail_20150507.tar.gz",
 		dedupMode:     ingest.DedupContent,
@@ -31,8 +30,6 @@ func TestLoadConfigDefaults(t *testing.T) {
 func TestLoadConfigOverrides(t *testing.T) {
 	cfg, err := loadConfig(env(map[string]string{
 		"ADDR":           ":9000",
-		"REDIS_ADDR":     "redis:6379",
-		"REDIS_PASSWORD": "secret",
 		"DATASET_BUCKET": "s3://bucket?region=eu-north-1",
 		"DATASET_KEY":    "other.tar.gz",
 		"DEDUP_MODE":     "message_id",
@@ -42,8 +39,6 @@ func TestLoadConfigOverrides(t *testing.T) {
 	}
 	want := config{
 		addr:          ":9000",
-		redisAddr:     "redis:6379",
-		redisPassword: "secret",
 		datasetBucket: "s3://bucket?region=eu-north-1",
 		datasetKey:    "other.tar.gz",
 		dedupMode:     ingest.DedupMessageID,
