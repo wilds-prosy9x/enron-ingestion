@@ -28,11 +28,6 @@ type StarterConfig struct {
 	// BatchSize and FlushInterval are passed to the Runner; zero means its default.
 	BatchSize     int
 	FlushInterval time.Duration
-	// LeaseRenewInterval is how often a run's lease is renewed. Default store.LeaseTTL / 3.
-	LeaseRenewInterval time.Duration
-	// LeaseRetryInterval is how soon a failed renewal is retried, at most
-	// LeaseRenewInterval. Default 1 second.
-	LeaseRetryInterval time.Duration
 }
 
 // Starter starts ingestion runs in the background.
@@ -65,8 +60,8 @@ func (s *Starter) Start(ctx context.Context) error {
 	if s.stopped {
 		return ErrStopped
 	}
-	// If ctx were cancelled while TryStart waits for Redis's reply, the run
-	// could be recorded as running with nothing running it.
+	// If ctx were cancelled while TryStart is in progress, the run could be
+	// recorded as running with nothing running it.
 	startCtx, cancelStart := context.WithTimeout(context.WithoutCancel(ctx), startTimeout)
 	defer cancelStart()
 	mode := s.cfg.Source.DedupMode()
@@ -85,20 +80,9 @@ func (s *Starter) Start(ctx context.Context) error {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		runCtx, stopRun := context.WithCancel(s.ctx)
-		defer stopRun()
-		leaseDone := make(chan struct{})
-		go func() {
-			defer close(leaseDone)
-			s.keepLease(runCtx, run, stopRun)
-		}()
-
 		start := time.Now()
 		slog.Info("ingestion started", "dedup_mode", mode)
-		err := r.Run(runCtx)
-		stopRun()
-		<-leaseDone
-		if err != nil {
+		if err := r.Run(s.ctx); err != nil {
 			slog.Error("ingestion failed", "error", err, "duration", time.Since(start))
 			return
 		}
@@ -110,8 +94,6 @@ func (s *Starter) Start(ctx context.Context) error {
 // failReason returns the reason recorded for a run that failed with err. API
 // clients see it, so it only names the kind of failure, leaving out details
 // such as storage addresses and bucket URLs; the full error is logged.
-// The store reports one more reason, store.ReasonInterrupted, which these
-// must not clash with.
 func failReason(err error) string {
 	switch {
 	case errors.Is(err, context.Canceled):
@@ -122,44 +104,6 @@ func failReason(err error) string {
 		return "dataset archive could not be read"
 	default:
 		return "internal error"
-	}
-}
-
-// keepLease renews run's lease until ctx is done. If the lease has expired or
-// the run has been replaced by another one, it calls stopRun, as the run can't
-// record anything more. Other errors are retried after the shorter retry
-// interval, so that the lease only expires if they last for about store.LeaseTTL.
-func (s *Starter) keepLease(ctx context.Context, run store.Run, stopRun func()) {
-	interval := s.cfg.LeaseRenewInterval
-	if interval <= 0 {
-		interval = store.LeaseTTL / 3
-	}
-	retry := s.cfg.LeaseRetryInterval
-	if retry <= 0 {
-		retry = time.Second
-	}
-	retry = min(retry, interval)
-	timer := time.NewTimer(interval)
-	defer timer.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-		}
-		err := run.RenewLease(ctx)
-		next := interval
-		switch {
-		case err == nil, ctx.Err() != nil:
-		case errors.Is(err, store.ErrNotRunning):
-			slog.Error("ingestion run's lease has expired or it was replaced, stopping it")
-			stopRun()
-			return
-		default:
-			slog.Warn("renew ingestion lease", "error", err)
-			next = retry
-		}
-		timer.Reset(next)
 	}
 }
 

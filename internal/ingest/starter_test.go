@@ -15,8 +15,8 @@ import (
 	"github.com/wilds-prosy9x/enron-ingestion/internal/store"
 )
 
-// fakeRunStore adds TryStart and RenewLease to fakeRecorder, and is its own
-// store.Run. It allows one run at a time.
+// fakeRunStore adds TryStart to fakeRecorder, and is its own store.Run.
+// It allows one run at a time.
 type fakeRunStore struct {
 	*fakeRecorder
 	mu       sync.Mutex
@@ -24,11 +24,6 @@ type fakeRunStore struct {
 	modes    []string
 	startErr error // ctx.Err() seen by TryStart
 	tryErr   error // optional: returned by TryStart without starting a run
-	renewErr error // optional: returned by RenewLease
-	// renewFailures optionally limits renewErr to the first renewFailures renewals.
-	renewFailures int
-	renewals      int
-	renewTimes    []time.Time
 }
 
 func (f *fakeRunStore) TryStart(ctx context.Context, dedupMode string) (store.Run, error) {
@@ -44,23 +39,6 @@ func (f *fakeRunStore) TryStart(ctx context.Context, dedupMode string) (store.Ru
 	f.modes = append(f.modes, dedupMode)
 	f.startErr = ctx.Err()
 	return f, nil
-}
-
-func (f *fakeRunStore) RenewLease(context.Context) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.renewals++
-	f.renewTimes = append(f.renewTimes, time.Now())
-	if f.renewFailures > 0 && f.renewals > f.renewFailures {
-		return nil
-	}
-	return f.renewErr
-}
-
-func (f *fakeRunStore) renewCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.renewals
 }
 
 func TestStarterRunsInBackground(t *testing.T) {
@@ -142,19 +120,14 @@ func TestStarterStopWithoutRun(t *testing.T) {
 // TestStarterStartError checks that when TryStart fails, Start returns its
 // error without starting a run, and a later Start still works.
 func TestStarterStartError(t *testing.T) {
-	tryErr := errors.New("dial tcp 10.0.0.5:6379: connection refused")
+	tryErr := errors.New("store unavailable")
 	st := &fakeRunStore{fakeRecorder: &fakeRecorder{}, tryErr: tryErr}
 	src := &chanSource{ch: make(chan ingest.Message)}
-	s := ingest.NewStarter(st, ingest.StarterConfig{Source: src, LeaseRenewInterval: time.Millisecond})
+	s := ingest.NewStarter(st, ingest.StarterConfig{Source: src})
 	t.Cleanup(s.Stop)
 
 	if err := s.Start(t.Context()); !errors.Is(err, tryErr) {
 		t.Fatalf("Start: err = %v, want %v", err, tryErr)
-	}
-	// A started run would renew its lease every millisecond.
-	time.Sleep(20 * time.Millisecond)
-	if n := st.renewCount(); n != 0 {
-		t.Errorf("lease renewed %d times, want no run", n)
 	}
 
 	st.mu.Lock()
@@ -192,53 +165,6 @@ func TestStarterStartIgnoresRequestCancel(t *testing.T) {
 	}
 }
 
-func TestStarterRenewsLease(t *testing.T) {
-	st := &fakeRunStore{fakeRecorder: &fakeRecorder{}}
-	src := &chanSource{ch: make(chan ingest.Message)}
-	s := ingest.NewStarter(st, ingest.StarterConfig{Source: src, LeaseRenewInterval: time.Millisecond})
-	t.Cleanup(s.Stop)
-
-	if err := s.Start(t.Context()); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	waitFor(t, "lease renewals", func() bool { return st.renewCount() >= 3 })
-
-	// Renewals stop with the run.
-	close(src.ch)
-	waitFor(t, "run to finish", func() bool {
-		_, _, finished, _ := st.snapshot()
-		return finished
-	})
-	s.Stop()
-	n := st.renewCount()
-	time.Sleep(20 * time.Millisecond)
-	if got := st.renewCount(); got != n {
-		t.Errorf("lease renewed %d times after the run ended", got-n)
-	}
-}
-
-// TestStarterStopsRunThatLostLease checks that a run is cancelled once renewing its
-// lease shows that the lease has expired or another run has replaced it.
-func TestStarterStopsRunThatLostLease(t *testing.T) {
-	st := &fakeRunStore{fakeRecorder: &fakeRecorder{}, renewErr: store.ErrNotRunning}
-	s := ingest.NewStarter(st, ingest.StarterConfig{
-		Source:             &chanSource{ch: make(chan ingest.Message)}, // never ends by itself
-		LeaseRenewInterval: time.Millisecond,
-	})
-	t.Cleanup(s.Stop)
-
-	if err := s.Start(t.Context()); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	waitFor(t, "run to be cancelled", func() bool {
-		_, _, _, failed := st.snapshot()
-		return failed == "ingestion cancelled"
-	})
-	if got := st.renewCount(); got != 1 {
-		t.Errorf("RenewLease called %d times, want 1", got)
-	}
-}
-
 // TestStarterFailReasons checks that a failed run records a reason that names
 // the kind of failure without the error's details.
 func TestStarterFailReasons(t *testing.T) {
@@ -269,57 +195,5 @@ func TestStarterFailReasons(t *testing.T) {
 				t.Errorf("failed = %q, want %q", failed, tt.want)
 			}
 		})
-	}
-}
-
-// TestStarterKeepsRenewingAfterErrors checks that a failed renewal other than
-// ErrNotRunning doesn't stop the run.
-func TestStarterKeepsRenewingAfterErrors(t *testing.T) {
-	st := &fakeRunStore{fakeRecorder: &fakeRecorder{}, renewErr: errors.New("connection refused")}
-	s := ingest.NewStarter(st, ingest.StarterConfig{
-		Source:             &chanSource{ch: make(chan ingest.Message)},
-		LeaseRenewInterval: time.Millisecond,
-	})
-	t.Cleanup(s.Stop)
-
-	if err := s.Start(t.Context()); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	waitFor(t, "lease renewals", func() bool { return st.renewCount() >= 3 })
-	if _, _, finished, failed := st.snapshot(); finished || failed != "" {
-		t.Errorf("finished = %v, failed = %q; want the run still in progress", finished, failed)
-	}
-}
-
-// TestStarterRetriesFailedRenewalSoon checks that a failed renewal is retried
-// after LeaseRetryInterval rather than a whole LeaseRenewInterval, so that a few
-// failures in a row don't let the lease expire, and that renewals go back to
-// LeaseRenewInterval once one succeeds.
-func TestStarterRetriesFailedRenewalSoon(t *testing.T) {
-	const interval = 200 * time.Millisecond
-	st := &fakeRunStore{fakeRecorder: &fakeRecorder{}, renewErr: errors.New("i/o timeout"), renewFailures: 3}
-	s := ingest.NewStarter(st, ingest.StarterConfig{
-		Source:             &chanSource{ch: make(chan ingest.Message)},
-		LeaseRenewInterval: interval,
-		LeaseRetryInterval: time.Millisecond,
-	})
-	t.Cleanup(s.Stop)
-
-	if err := s.Start(t.Context()); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	// 3 failures, the successful retry and the next regular renewal.
-	waitFor(t, "lease renewals", func() bool { return st.renewCount() >= 5 })
-
-	st.mu.Lock()
-	times := st.renewTimes[:5]
-	st.mu.Unlock()
-	for i := 1; i < 4; i++ {
-		if gap := times[i].Sub(times[i-1]); gap >= interval/2 {
-			t.Errorf("retry %d came %v after the failure, want well under %v", i, gap, interval)
-		}
-	}
-	if gap := times[4].Sub(times[3]); gap < interval {
-		t.Errorf("renewal after a success came after %v, want at least %v", gap, interval)
 	}
 }

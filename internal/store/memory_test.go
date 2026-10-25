@@ -51,9 +51,6 @@ func checkEnded(t *testing.T, run store.Run) {
 	if err := run.RecordBatch(ctx, []store.Record{{Key: "late", From: "a@enron.com"}}); !errors.Is(err, store.ErrNotRunning) {
 		t.Errorf("RecordBatch: err = %v, want ErrNotRunning", err)
 	}
-	if err := run.RenewLease(ctx); !errors.Is(err, store.ErrNotRunning) {
-		t.Errorf("RenewLease: err = %v, want ErrNotRunning", err)
-	}
 	if err := run.Finish(ctx); !errors.Is(err, store.ErrNotRunning) {
 		t.Errorf("Finish: err = %v, want ErrNotRunning", err)
 	}

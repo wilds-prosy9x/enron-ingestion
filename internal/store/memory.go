@@ -38,7 +38,8 @@ func (m *Memory) TryStart(_ context.Context, dedupMode string) (Run, error) {
 }
 
 // memoryRun is a Run of a Memory store. Its methods only act while it is the
-// store's current run and in progress.
+// store's current run and in progress, so a failed run can't change the run
+// that replaced it.
 type memoryRun struct {
 	m *Memory
 }
@@ -48,16 +49,6 @@ var _ Run = (*memoryRun)(nil)
 // active reports whether run can change the store. run.m.mu must be held.
 func (run *memoryRun) active() bool {
 	return run.m.run == run && run.m.status.State == StateRunning
-}
-
-func (run *memoryRun) RenewLease(context.Context) error {
-	m := run.m
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if !run.active() {
-		return ErrNotRunning
-	}
-	return nil
 }
 
 func (run *memoryRun) RecordBatch(_ context.Context, records []Record) error {
