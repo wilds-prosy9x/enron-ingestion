@@ -16,19 +16,14 @@ import (
 	"time"
 
 	"github.com/wilds-prosy9x/enron-ingestion/internal/ingest"
-	"github.com/wilds-prosy9x/enron-ingestion/internal/redistest"
 	"github.com/wilds-prosy9x/enron-ingestion/internal/server"
 	"github.com/wilds-prosy9x/enron-ingestion/internal/store"
 )
 
-func TestMain(m *testing.M) {
-	os.Exit(redistest.Run(m))
-}
-
-// startApp starts a real HTTP server backed by Redis, reading messages from src.
+// startApp starts a real HTTP server with an empty store, reading messages from src.
 func startApp(t *testing.T, src ingest.Source) string {
 	t.Helper()
-	st := store.NewRedis(redistest.Client(t), redistest.Prefix(t))
+	st := store.NewMemory()
 	starter := ingest.NewStarter(st, ingest.StarterConfig{Source: src, BatchSize: 1})
 	ts := httptest.NewServer(server.NewHandler(st, starter))
 	// Cleanups run in reverse order: stop the server, then any run.
@@ -115,7 +110,7 @@ func TestStatusBeforeStart(t *testing.T) {
 	checkBody(t, "top senders", body, senders())
 }
 
-// TestFullRun ingests a small archive end to end: storage, parsing, Redis and the API.
+// TestFullRun ingests a small archive end to end: storage, parsing, the store and the API.
 func TestFullRun(t *testing.T) {
 	dir := t.TempDir()
 	m1 := []string{"From: a@enron.com", "Date: Mon, 1 Jan 2001 10:00:00 -0800", "Subject: one"}
@@ -199,8 +194,8 @@ func TestPausedRun(t *testing.T) {
 		"unique_message_count":    float64(4),
 	})
 	_, body = call(t, http.MethodGet, url+"/top-senders")
-	// Equal counts are in reverse alphabetical order.
-	checkBody(t, "top senders at end", body, senders("a@enron.com", 2, "c@enron.com", 1, "b@enron.com", 1))
+	// Equal counts are in alphabetical order.
+	checkBody(t, "top senders at end", body, senders("a@enron.com", 2, "b@enron.com", 1, "c@enron.com", 1))
 }
 
 // TestFailedRunCanRestart checks that a run that fails because the archive is

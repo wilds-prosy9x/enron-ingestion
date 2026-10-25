@@ -1,31 +1,14 @@
 services:
-  redis:
-    image: redis:7.4
-    volumes:
-      - redis-data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 2s
-      timeout: 2s
-      retries: 10
-
   app:
     build: .
     ports:
       - "8080:8080"
     environment:
-      REDIS_ADDR: redis:6379
       DATASET_BUCKET: file:///data
       DATASET_KEY: ${DATASET_KEY:-enron_mail_20150507.tar.gz}
       DEDUP_MODE: ${DEDUP_MODE:-content}
     volumes:
       # The directory containing the archive; by default the repository's parent.
       - ${DATASET_DIR:-..}:/data:ro
-    depends_on:
-      redis:
-        condition: service_healthy
-    # A cancelled run may take about 20 seconds to record what it has read.
+    # Shutdown waits up to 10 seconds for requests in progress; leave some headroom.
     stop_grace_period: 30s
-
-volumes:
-  redis-data:
