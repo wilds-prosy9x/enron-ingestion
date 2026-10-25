@@ -10,5 +10,5 @@ services:
     volumes:
       # The directory containing the archive; by default the repository's parent.
       - ${DATASET_DIR:-..}:/data:ro
-    # A cancelled run may take about 20 seconds to record what it has read.
+    # Shutdown waits up to 10 seconds for requests in progress; leave some headroom.
     stop_grace_period: 30s
