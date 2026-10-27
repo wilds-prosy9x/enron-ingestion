@@ -7,7 +7,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/wilds-prosy9x/enron-ingestion/internal/ingest"
 	"github.com/wilds-prosy9x/enron-ingestion/internal/server"
@@ -49,7 +52,7 @@ func do(t *testing.T, h http.Handler, method, path string) (int, map[string]any)
 
 // TestRouting checks the status codes for supported and unsupported requests.
 func TestRouting(t *testing.T) {
-	h := server.NewHandler(&fakeStore{}, &fakeStarter{})
+	h := server.NewHandler(&fakeStore{}, &fakeStarter{}, prometheus.NewRegistry())
 
 	tests := []struct {
 		method string
@@ -71,6 +74,8 @@ func TestRouting(t *testing.T) {
 		{http.MethodGet, "/readyz", http.StatusOK},
 		{http.MethodHead, "/readyz", http.StatusOK},
 		{http.MethodPost, "/readyz", http.StatusMethodNotAllowed},
+		{http.MethodGet, "/metrics", http.StatusOK},
+		{http.MethodPost, "/metrics", http.StatusMethodNotAllowed},
 		{http.MethodGet, "/nope", http.StatusNotFound},
 		{http.MethodGet, "/", http.StatusNotFound},
 	}
@@ -95,7 +100,7 @@ func TestStartRefused(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := server.NewHandler(&fakeStore{}, &fakeStarter{err: tt.err})
+			h := server.NewHandler(&fakeStore{}, &fakeStarter{err: tt.err}, prometheus.NewRegistry())
 
 			code, body := do(t, h, http.MethodPost, "/start")
 			if code != tt.wantCode {
@@ -111,7 +116,7 @@ func TestStartRefused(t *testing.T) {
 func TestStatusFailedRun(t *testing.T) {
 	h := server.NewHandler(&fakeStore{status: store.Status{
 		State: store.StateFailed, DedupMode: "content", Processed: 5, Unique: 4, Skipped: 1, Error: "archive truncated",
-	}}, &fakeStarter{})
+	}}, &fakeStarter{}, prometheus.NewRegistry())
 
 	_, body := do(t, h, http.MethodGet, "/status")
 	want := map[string]any{
@@ -127,7 +132,7 @@ func TestStatusFailedRun(t *testing.T) {
 }
 
 func TestTopSendersEmpty(t *testing.T) {
-	h := server.NewHandler(&fakeStore{}, &fakeStarter{})
+	h := server.NewHandler(&fakeStore{}, &fakeStarter{}, prometheus.NewRegistry())
 
 	// An empty list must be [], not null.
 	_, body := do(t, h, http.MethodGet, "/top-senders")
@@ -153,7 +158,7 @@ func TestHealthAndReadiness(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := server.NewHandler(&fakeStore{err: tt.storeErr}, &fakeStarter{})
+			h := server.NewHandler(&fakeStore{err: tt.storeErr}, &fakeStarter{}, prometheus.NewRegistry())
 
 			code, body := do(t, h, http.MethodGet, tt.path)
 			if code != tt.wantCode {
@@ -166,11 +171,31 @@ func TestHealthAndReadiness(t *testing.T) {
 	}
 }
 
+func TestMetrics(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	c := prometheus.NewCounter(prometheus.CounterOpts{Name: "test_total", Help: "A test counter."})
+	reg.MustRegister(c)
+	c.Add(3)
+	h := server.NewHandler(&fakeStore{}, &fakeStarter{}, reg)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Errorf("Content-Type = %q, want text/plain", ct)
+	}
+	if want := "test_total 3\n"; !strings.Contains(rec.Body.String(), want) {
+		t.Errorf("body doesn't contain %q:\n%s", want, rec.Body)
+	}
+}
+
 // TestInternalErrors checks that store and starter errors give a generic 500
 // without leaking the error's text.
 func TestInternalErrors(t *testing.T) {
 	secret := errors.New("dial tcp 10.0.0.5:6379: connection refused")
-	h := server.NewHandler(&fakeStore{err: secret}, &fakeStarter{err: secret})
+	h := server.NewHandler(&fakeStore{err: secret}, &fakeStarter{err: secret}, prometheus.NewRegistry())
 
 	for _, req := range []struct{ method, path string }{
 		{http.MethodPost, "/start"},

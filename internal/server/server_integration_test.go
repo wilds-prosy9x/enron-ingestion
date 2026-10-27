@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/wilds-prosy9x/enron-ingestion/internal/ingest"
 	"github.com/wilds-prosy9x/enron-ingestion/internal/server"
 	"github.com/wilds-prosy9x/enron-ingestion/internal/store"
@@ -25,7 +27,7 @@ func startApp(t *testing.T, src ingest.Source) string {
 	t.Helper()
 	st := store.NewMemory()
 	starter := ingest.NewStarter(st, ingest.StarterConfig{Source: src, BatchSize: 1})
-	ts := httptest.NewServer(server.NewHandler(st, starter))
+	ts := httptest.NewServer(server.NewHandler(st, starter, prometheus.NewRegistry()))
 	// Cleanups run in reverse order: stop the server, then any run.
 	t.Cleanup(starter.Stop)
 	t.Cleanup(ts.Close)

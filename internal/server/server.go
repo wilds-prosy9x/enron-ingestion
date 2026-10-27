@@ -8,6 +8,9 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"github.com/wilds-prosy9x/enron-ingestion/internal/ingest"
 	"github.com/wilds-prosy9x/enron-ingestion/internal/store"
 )
@@ -29,9 +32,11 @@ type Starter interface {
 }
 
 // NewHandler returns the root HTTP handler with all API routes registered.
-func NewHandler(st Store, starter Starter) http.Handler {
+// GET /metrics serves the metrics registered in reg in the Prometheus format.
+func NewHandler(st Store, starter Starter, reg *prometheus.Registry) http.Handler {
 	h := &handler{store: st, starter: starter}
 	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	mux.HandleFunc("POST /start", h.start)
 	mux.HandleFunc("GET /status", h.status)
 	mux.HandleFunc("GET /top-senders", h.topSenders)

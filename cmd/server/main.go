@@ -11,6 +11,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+
 	"github.com/wilds-prosy9x/enron-ingestion/internal/ingest"
 	"github.com/wilds-prosy9x/enron-ingestion/internal/server"
 	"github.com/wilds-prosy9x/enron-ingestion/internal/store"
@@ -76,9 +79,17 @@ func run(ctx context.Context, stopSignals func()) error {
 	// in progress, which is then marked failed, and waits for it.
 	defer starter.Stop()
 
+	// A registry of our own instead of the global default, so that only the
+	// metrics registered here are served.
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(
+		collectors.NewGoCollector(),
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
+	)
+
 	srv := &http.Server{
 		Addr:              cfg.addr,
-		Handler:           server.NewHandler(st, starter),
+		Handler:           server.NewHandler(st, starter, reg),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,

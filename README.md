@@ -213,3 +213,16 @@ curl localhost:8080/readyz
 |--------|-----------------------------------------------------------|
 | `200`  | Ready                                                     |
 | `503`  | The store can't be read: `{"error": "store unavailable"}` |
+
+### `GET /metrics`
+
+Operational metrics in the [Prometheus text format](https://prometheus.io/docs/instrumenting/exposition_formats/), for scraping by Prometheus or a compatible system. Unlike the endpoints above, it isn't JSON. It currently serves the Go runtime metrics (`go_*`, e.g. heap size and goroutines) and the process metrics (`process_*`, e.g. resident memory and CPU time).
+
+```bash
+curl localhost:8080/metrics
+```
+
+```
+go_goroutines 9
+process_resident_memory_bytes 3.2673792e+07
+```
