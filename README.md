@@ -85,6 +85,27 @@ There is one ingestion run per server process: once it has finished, `POST /star
 
 The state and counts are kept in memory only. When the server stops or restarts, they are lost: `GET /status` reports `not_started` again and the dataset has to be ingested from the start. Each server process has its own state, so instances don't share runs or results.
 
+## Design decisions
+
+### In-memory store
+
+The ingestion state, dedup keys and sender counts are kept in memory instead of an external store:
+
+- The data is small: a few hundred thousand dedup keys and the sender counts fit comfortably in one process's memory.
+- Ingestion is a single job. Running more instances wouldn't make it faster, and a dataset this size doesn't need several instances to serve the API.
+- It keeps the service self-contained: running it locally needs nothing but the archive.
+
+The cost is that results are lost on restart and aren't shared between instances; see [Ingestion runs](#ingestion-runs).
+
+### Running in production
+
+A deployment that must survive restarts or run several instances would need an external store, such as Redis, behind the `store.Store` interface. Beyond keeping the data, that store has to coordinate the instances:
+
+- Starting a run must be atomic across instances, so that only one of them ingests the dataset. The store's `TryStart` already does this check-and-set in one step for this reason.
+- A run must be leased: the instance running it renews the lease regularly, and a run whose lease has expired is reported as failed and can be started again. Otherwise an instance that dies mid-run leaves the run in `running` for good.
+
+An earlier version of this service did both with Redis; it was replaced by the in-memory store as more complexity than the dataset needs. See the repository history before commit `9f065c7`.
+
 ## API
 
 Errors are returned as JSON with a non-2xx status code:
