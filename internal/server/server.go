@@ -35,6 +35,8 @@ func NewHandler(st Store, starter Starter) http.Handler {
 	mux.HandleFunc("POST /start", h.start)
 	mux.HandleFunc("GET /status", h.status)
 	mux.HandleFunc("GET /top-senders", h.topSenders)
+	mux.HandleFunc("GET /healthz", h.healthz)
+	mux.HandleFunc("GET /readyz", h.readyz)
 	return mux
 }
 
@@ -117,6 +119,29 @@ func (h *handler) topSenders(w http.ResponseWriter, r *http.Request) {
 		resp.Senders[i] = SenderCount{Email: sc.Email, Count: sc.Count}
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// HealthResponse is the body returned by GET /healthz and by GET /readyz when ready.
+type HealthResponse struct {
+	Status string `json:"status"`
+}
+
+// healthz reports that the process is up and serving requests. It checks no
+// dependencies, so that a failing store doesn't get the process restarted.
+func (h *handler) healthz(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, HealthResponse{Status: "ok"})
+}
+
+// readyz reports whether the server can serve the API, i.e. whether the store
+// can be read. It doesn't depend on the ingestion state: the API is usable
+// before, during and after a run.
+func (h *handler) readyz(w http.ResponseWriter, r *http.Request) {
+	if _, err := h.store.Status(r.Context()); err != nil {
+		slog.Error("readiness check", "error", err)
+		writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{Error: "store unavailable"})
+		return
+	}
+	writeJSON(w, http.StatusOK, HealthResponse{Status: "ready"})
 }
 
 // internalError logs err and sends a generic 500 response, so that internal

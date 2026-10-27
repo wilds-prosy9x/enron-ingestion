@@ -65,6 +65,12 @@ func TestRouting(t *testing.T) {
 		{http.MethodDelete, "/status", http.StatusMethodNotAllowed},
 		{http.MethodGet, "/top-senders", http.StatusOK},
 		{http.MethodPost, "/top-senders", http.StatusMethodNotAllowed},
+		{http.MethodGet, "/healthz", http.StatusOK},
+		{http.MethodHead, "/healthz", http.StatusOK},
+		{http.MethodPost, "/healthz", http.StatusMethodNotAllowed},
+		{http.MethodGet, "/readyz", http.StatusOK},
+		{http.MethodHead, "/readyz", http.StatusOK},
+		{http.MethodPost, "/readyz", http.StatusMethodNotAllowed},
 		{http.MethodGet, "/nope", http.StatusNotFound},
 		{http.MethodGet, "/", http.StatusNotFound},
 	}
@@ -127,6 +133,36 @@ func TestTopSendersEmpty(t *testing.T) {
 	_, body := do(t, h, http.MethodGet, "/top-senders")
 	if want := map[string]any{"senders": []any{}}; !reflect.DeepEqual(body, want) {
 		t.Errorf("body = %v, want %v", body, want)
+	}
+}
+
+func TestHealthAndReadiness(t *testing.T) {
+	tests := []struct {
+		name     string
+		path     string
+		storeErr error
+		wantCode int
+		wantBody map[string]any
+	}{
+		{"healthy", "/healthz", nil, http.StatusOK, map[string]any{"status": "ok"}},
+		// Liveness ignores the store, so a store outage doesn't restart the process.
+		{"healthy with store down", "/healthz", errors.New("down"), http.StatusOK, map[string]any{"status": "ok"}},
+		{"ready", "/readyz", nil, http.StatusOK, map[string]any{"status": "ready"}},
+		{"not ready", "/readyz", errors.New("dial tcp 10.0.0.5:6379: connection refused"),
+			http.StatusServiceUnavailable, map[string]any{"error": "store unavailable"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := server.NewHandler(&fakeStore{err: tt.storeErr}, &fakeStarter{})
+
+			code, body := do(t, h, http.MethodGet, tt.path)
+			if code != tt.wantCode {
+				t.Errorf("status = %d, want %d", code, tt.wantCode)
+			}
+			if !reflect.DeepEqual(body, tt.wantBody) {
+				t.Errorf("body = %v, want %v", body, tt.wantBody)
+			}
+		})
 	}
 }
 

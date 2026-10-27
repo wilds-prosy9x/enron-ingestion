@@ -163,3 +163,32 @@ curl localhost:8080/top-senders
 | `senders[].count` | integer | Number of distinct emails from the sender                   |
 
 Senders with equal counts are listed in alphabetical order.
+
+### `GET /healthz`
+
+Liveness probe: reports that the process is up and serving requests. It checks no dependencies, so an unavailable store doesn't get the process restarted.
+
+```bash
+curl localhost:8080/healthz
+```
+
+```json
+{"status": "ok"}
+```
+
+### `GET /readyz`
+
+Readiness probe: reports whether the API can be served, i.e. whether the store can be read. It doesn't depend on the ingestion state; the server is ready before, during and after a run.
+
+```bash
+curl localhost:8080/readyz
+```
+
+```json
+{"status": "ready"}
+```
+
+| Status | Meaning                                                   |
+|--------|-----------------------------------------------------------|
+| `200`  | Ready                                                     |
+| `503`  | The store can't be read: `{"error": "store unavailable"}` |
